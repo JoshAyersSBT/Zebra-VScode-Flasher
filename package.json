@@ -1,0 +1,133 @@
+{
+  "name": "zebra-vscode-flasher",
+  "displayName": "Zebra MicroPython",
+  "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
+  "version": "0.0.2",
+  "publisher": "zebra-robotics",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:zebraExplorer",
+    "onCommand:zebra.initProject",
+    "onCommand:zebra.projectStatus",
+    "onCommand:zebra.checkProject",
+    "onCommand:zebra.setupToolchain",
+    "onCommand:zebra.detectSerialPort",
+    "onCommand:zebra.deployProject",
+    "onCommand:zebra.flashFirmware",
+    "onCommand:zebra.resetDevice",
+    "onCommand:zebra.openSerialMonitor",
+    "onCommand:zebra.openDriverHelp"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "zebra",
+          "title": "Zebra",
+          "icon": "$(circuit-board)"
+        }
+      ]
+    },
+    "views": {
+      "zebra": [
+        {
+          "id": "zebraExplorer",
+          "name": "Zebra Project"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "zebra.refreshExplorer", "title": "Zebra: Refresh", "icon": "$(refresh)" },
+      { "command": "zebra.initProject", "title": "Zebra: Initialize Project", "icon": "$(new-folder)" },
+      { "command": "zebra.projectStatus", "title": "Zebra: Project Status", "icon": "$(info)" },
+      { "command": "zebra.checkProject", "title": "Zebra: Check Python Syntax", "icon": "$(check)" },
+      { "command": "zebra.setupToolchain", "title": "Zebra: Setup Toolchain", "icon": "$(tools)" },
+      { "command": "zebra.detectSerialPort", "title": "Zebra: Detect ESP32 Serial Port", "icon": "$(plug)" },
+      { "command": "zebra.deployProject", "title": "Zebra: Deploy Project to ESP32", "icon": "$(cloud-upload)" },
+      { "command": "zebra.flashFirmware", "title": "Zebra: Flash MicroPython Firmware", "icon": "$(zap)" },
+      { "command": "zebra.resetDevice", "title": "Zebra: Reset Device", "icon": "$(debug-restart)" },
+      { "command": "zebra.openSerialMonitor", "title": "Zebra: Open Serial Monitor", "icon": "$(terminal)" },
+      { "command": "zebra.openDriverHelp", "title": "Zebra: Open USB UART Driver Help", "icon": "$(link-external)" }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "zebra.refreshExplorer",
+          "when": "view == zebraExplorer",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "zebra.deployProject",
+          "when": "resourceLangId == python",
+          "group": "navigation@10"
+        },
+        {
+          "command": "zebra.openSerialMonitor",
+          "when": "resourceLangId == python",
+          "group": "navigation@11"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "zebra.deployProject",
+          "when": "zebra.projectActive",
+          "group": "zebra@1"
+        },
+        {
+          "command": "zebra.checkProject",
+          "when": "zebra.projectActive",
+          "group": "zebra@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Zebra MicroPython",
+      "properties": {
+        "zebra.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to create the extension-managed Zebra toolchain virtual environment. Use python3 on Linux/macOS if needed."
+        },
+        "zebra.port": {
+          "type": "string",
+          "default": "AUTO",
+          "description": "Serial port to use for mpremote/esptool. Use AUTO to detect."
+        },
+        "zebra.flashBaud": {
+          "type": "number",
+          "default": 460800,
+          "description": "Baud rate used for esptool firmware flashing."
+        },
+        "zebra.runtimePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to runtime main.py and robot/ folder. Defaults to extension resources/runtime, or zebra.json runtimePath."
+        },
+        "zebra.serialMonitorBaud": {
+          "type": "number",
+          "default": 115200,
+          "description": "Baud rate used for the serial monitor terminal."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.92.0",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {}
+}
