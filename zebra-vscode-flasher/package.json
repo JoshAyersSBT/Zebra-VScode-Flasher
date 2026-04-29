@@ -1,0 +1,86 @@
+{
+  "name": "zebra-vscode-flasher",
+  "displayName": "Zebra MicroPython Flasher",
+  "description": "VS Code extension for setting up tools, flashing MicroPython firmware, and deploying ZebraBot MicroPython projects.",
+  "version": "0.0.1",
+  "publisher": "zebra-robotics",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:zebra.setupToolchain",
+    "onCommand:zebra.detectSerialPort",
+    "onCommand:zebra.deployProject",
+    "onCommand:zebra.flashFirmware",
+    "onCommand:zebra.openDriverHelp"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "zebra.setupToolchain",
+        "title": "Zebra: Setup Toolchain"
+      },
+      {
+        "command": "zebra.detectSerialPort",
+        "title": "Zebra: Detect ESP32 Serial Port"
+      },
+      {
+        "command": "zebra.deployProject",
+        "title": "Zebra: Deploy Project to ESP32"
+      },
+      {
+        "command": "zebra.flashFirmware",
+        "title": "Zebra: Flash MicroPython Firmware"
+      },
+      {
+        "command": "zebra.openDriverHelp",
+        "title": "Zebra: Open USB UART Driver Help"
+      }
+    ],
+    "configuration": {
+      "title": "Zebra MicroPython Flasher",
+      "properties": {
+        "zebra.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to create the extension-managed Zebra toolchain virtual environment."
+        },
+        "zebra.port": {
+          "type": "string",
+          "default": "AUTO",
+          "description": "Serial port to use for mpremote/esptool. Use AUTO to detect."
+        },
+        "zebra.flashBaud": {
+          "type": "number",
+          "default": 460800,
+          "description": "Baud rate used for esptool firmware flashing."
+        },
+        "zebra.runtimePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to runtime main.py and robot/ folder. Defaults to extension resources/runtime."
+        },
+        "zebra.serialMonitorBaud": {
+          "type": "number",
+          "default": 115200,
+          "description": "Baud rate used for the post-deploy serial monitor terminal."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.92.0",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {}
+}
