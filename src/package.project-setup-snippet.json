@@ -1,0 +1,17 @@
+{
+  "activationEvents_to_add": [
+    "onCommand:zebra.projectSetup"
+  ],
+  "commands_to_add": [
+    {
+      "command": "zebra.projectSetup",
+      "title": "Zebra: Project Setup",
+      "icon": "$(dashboard)"
+    }
+  ],
+  "recommended_existing_command_change": {
+    "command": "zebra.projectStatus",
+    "title": "Zebra: Project Status",
+    "behavior": "Now opens the same Project Setup webview panel instead of writing to the output terminal."
+  }
+}
