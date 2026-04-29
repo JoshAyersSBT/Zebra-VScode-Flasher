@@ -510,10 +510,12 @@ async function ensureRobotDriversInstalled(root: string, force = false): Promise
 
 async function findCachedRobotDir(): Promise<string | undefined> {
   const candidates = [
+    // Canonical bundled runtime location for this extension.
+    getBundledRobotDir(),
+
+    // User/global cache locations populated by Zebra: Refresh Robot Driver Cache.
     path.join(getDriverCacheRoot(), 'robot'),
     path.join(getDriverCacheRoot(), 'Zebra_SOL_Flasher', 'robot'),
-    path.join(extensionContext.extensionPath, 'resources', 'runtime', 'robot'),
-    path.join(extensionContext.extensionPath, 'resources', 'robot'),
   ];
 
   for (const candidate of candidates) {
@@ -527,6 +529,18 @@ async function findCachedRobotDir(): Promise<string | undefined> {
 
 function getDriverCacheRoot(): string {
   return path.join(extensionContext.globalStorageUri.fsPath, 'driver-cache');
+}
+
+function getBundledRuntimeDir(): string {
+  return path.join(extensionContext.extensionPath, 'resources', 'runtime');
+}
+
+function getBundledRobotDir(): string {
+  return path.join(getBundledRuntimeDir(), 'robot');
+}
+
+function getBundledRuntimeMain(): string {
+  return path.join(getBundledRuntimeDir(), 'main.py');
 }
 
 async function buildStagedProject(root: string): Promise<string> {
@@ -574,8 +588,10 @@ async function buildStagedProject(root: string): Promise<string> {
 
 async function findRuntimeMain(root: string): Promise<string | undefined> {
   const candidates = [
-    path.join(extensionContext.extensionPath, 'resources', 'runtime', 'main.py'),
-    path.join(extensionContext.extensionPath, 'resources', 'main.py'),
+    // Canonical bundled runtime location for this extension.
+    getBundledRuntimeMain(),
+
+    // Optional project override for advanced/local runtime experiments.
     path.join(root, '.zebra', 'runtime', 'main.py'),
   ];
 
