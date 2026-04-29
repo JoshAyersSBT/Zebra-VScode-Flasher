@@ -24,6 +24,8 @@ const ACTIONS: Record<string, Action[]> = {
   ],
   Toolchain: [
     { label: 'Setup Toolchain', command: 'zebra.setupToolchain', icon: 'tools' },
+    { label: 'Refresh Driver Cache', command: 'zebra.refreshDriverCache', icon: 'sync' },
+    { label: 'Install Robot Drivers', command: 'zebra.installRobotDrivers', icon: 'file-submodule' },
     { label: 'Open USB Driver Help', command: 'zebra.openDriverHelp', icon: 'link-external' }
   ]
 };

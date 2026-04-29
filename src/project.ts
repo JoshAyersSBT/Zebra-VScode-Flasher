@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { ensureRobotDriversForProject } from './driverCache';
 
 export interface ZebraProjectConfig {
   name: string;
@@ -8,6 +9,7 @@ export interface ZebraProjectConfig {
   port: string;
   runtimePath: string;
   uploadProtocol: 'mpremote';
+  driverSource: 'local-cache' | 'repo' | 'bundled';
 }
 
 export function getWorkspaceRoot(): string {
@@ -30,7 +32,7 @@ export function writeProjectConfig(root: string, cfg: ZebraProjectConfig) {
   fs.writeFileSync(getProjectConfigPath(root), JSON.stringify(cfg, null, 2) + '\n', 'utf8');
 }
 
-export async function initProject(context: vscode.ExtensionContext): Promise<void> {
+export async function initProject(context: vscode.ExtensionContext, out: vscode.OutputChannel): Promise<void> {
   const root = getWorkspaceRoot();
   const name = path.basename(root);
   const cfg: ZebraProjectConfig = {
@@ -38,7 +40,8 @@ export async function initProject(context: vscode.ExtensionContext): Promise<voi
     board: 'esp32',
     port: 'AUTO',
     runtimePath: '',
-    uploadProtocol: 'mpremote'
+    uploadProtocol: 'mpremote',
+    driverSource: 'repo'
   };
 
   const existing = readProjectConfig(root);
@@ -48,6 +51,8 @@ export async function initProject(context: vscode.ExtensionContext): Promise<voi
   }
 
   writeProjectConfig(root, cfg);
+
+  await ensureRobotDriversForProject(context, root, out);
 
   const mainPath = path.join(root, 'main.py');
   if (!fs.existsSync(mainPath)) {
@@ -84,11 +89,13 @@ export async function showProjectStatus(context: vscode.ExtensionContext, out: v
   out.appendLine('=== Zebra Project Status ===');
   out.appendLine(`Workspace: ${root}`);
   out.appendLine(`zebra.json: ${cfg ? 'found' : 'missing'}`);
+  out.appendLine(`robot/: ${fs.existsSync(path.join(root, 'robot')) ? 'found' : 'missing'}`);
   if (cfg) {
     out.appendLine(`Project: ${cfg.name}`);
     out.appendLine(`Board: ${cfg.board}`);
     out.appendLine(`Port: ${cfg.port}`);
     out.appendLine(`Upload protocol: ${cfg.uploadProtocol}`);
+    out.appendLine(`Driver source: ${cfg.driverSource ?? 'unknown'}`);
   }
   out.appendLine(`Extension storage: ${context.globalStorageUri.fsPath}`);
 }

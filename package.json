@@ -16,6 +16,8 @@
     "onCommand:zebra.projectStatus",
     "onCommand:zebra.checkProject",
     "onCommand:zebra.setupToolchain",
+    "onCommand:zebra.refreshDriverCache",
+    "onCommand:zebra.installRobotDrivers",
     "onCommand:zebra.detectSerialPort",
     "onCommand:zebra.deployProject",
     "onCommand:zebra.flashFirmware",
@@ -48,6 +50,8 @@
       { "command": "zebra.projectStatus", "title": "Zebra: Project Status", "icon": "$(info)" },
       { "command": "zebra.checkProject", "title": "Zebra: Check Python Syntax", "icon": "$(check)" },
       { "command": "zebra.setupToolchain", "title": "Zebra: Setup Toolchain", "icon": "$(tools)" },
+      { "command": "zebra.refreshDriverCache", "title": "Zebra: Refresh Robot Driver Cache", "icon": "$(sync)" },
+      { "command": "zebra.installRobotDrivers", "title": "Zebra: Install Robot Drivers into Project", "icon": "$(file-submodule)" },
       { "command": "zebra.detectSerialPort", "title": "Zebra: Detect ESP32 Serial Port", "icon": "$(plug)" },
       { "command": "zebra.deployProject", "title": "Zebra: Deploy Project to ESP32", "icon": "$(cloud-upload)" },
       { "command": "zebra.flashFirmware", "title": "Zebra: Flash MicroPython Firmware", "icon": "$(zap)" },
@@ -110,6 +114,21 @@
           "type": "string",
           "default": "",
           "description": "Optional path to runtime main.py and robot/ folder. Defaults to extension resources/runtime, or zebra.json runtimePath."
+        },
+        "zebra.driverCachePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional local path containing robot/ drivers. Initialize Project uses this before fetching from the repo."
+        },
+        "zebra.driverRepoUrl": {
+          "type": "string",
+          "default": "https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git",
+          "description": "Repository used to populate the local Zebra robot driver cache when robot/ is not already cached."
+        },
+        "zebra.driverRepoBranch": {
+          "type": "string",
+          "default": "",
+          "description": "Optional branch or tag to use when cloning zebra.driverRepoUrl. Empty uses the repo default branch."
         },
         "zebra.serialMonitorBaud": {
           "type": "number",

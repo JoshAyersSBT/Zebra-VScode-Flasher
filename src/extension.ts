@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { syntaxCheckProject } from './check';
+import { ensureRobotDriversForProject, refreshDriverCache } from './driverCache';
 import { deployWithMpremote } from './deploy';
 import { ZebraExplorerProvider } from './explorer';
 import { flashFirmware, pickFirmwareBin } from './flash';
@@ -28,8 +29,20 @@ export function activate(context: vscode.ExtensionContext) {
 
     vscode.commands.registerCommand('zebra.initProject', async () => {
       try {
-        await initProject(context);
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Zebra: initializing project and toolchain'
+          },
+          async progress => {
+            progress.report({ message: 'Installing/checking Python tools...' });
+            await setupToolchain(context, out);
+            progress.report({ message: 'Creating Zebra project files...' });
+            await initProject(context, out);
+          }
+        );
         explorer.refresh();
+        vscode.window.showInformationMessage('Zebra project initialized and toolchain is ready.');
       } catch (err) {
         vscode.window.showErrorMessage(errorMessage(err));
       }
@@ -63,6 +76,31 @@ export function activate(context: vscode.ExtensionContext) {
         });
         explorer.refresh();
         vscode.window.showInformationMessage('Zebra toolchain setup complete.');
+      } catch (err) {
+        vscode.window.showErrorMessage(errorMessage(err));
+      }
+    }),
+
+    vscode.commands.registerCommand('zebra.refreshDriverCache', async () => {
+      try {
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Zebra: refreshing driver cache' }, async () => {
+          await refreshDriverCache(context, out);
+        });
+        explorer.refresh();
+        vscode.window.showInformationMessage('Zebra robot driver cache refreshed.');
+      } catch (err) {
+        vscode.window.showErrorMessage(errorMessage(err));
+      }
+    }),
+
+    vscode.commands.registerCommand('zebra.installRobotDrivers', async () => {
+      try {
+        const root = getWorkspaceRoot();
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Zebra: installing robot drivers' }, async () => {
+          await ensureRobotDriversForProject(context, root, out, { force: true });
+        });
+        explorer.refresh();
+        vscode.window.showInformationMessage('Zebra robot drivers installed into this project.');
       } catch (err) {
         vscode.window.showErrorMessage(errorMessage(err));
       }
