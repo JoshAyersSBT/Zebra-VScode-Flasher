@@ -5,80 +5,249 @@ import * as os from 'os';
 import * as cp from 'child_process';
 
 import {
+  SerialCandidate,
   listSerialCandidates,
   pickSerialPort,
   resolveSerialPort,
   openDriverHelp,
 } from './serial';
-import { ProjectSetupPanel, ProjectSetupAction, ProjectSetupState } from './projectSetupPanel';
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git';
+const SKIP_DIRS = new Set(['__pycache__', '.git', '.vscode', '.idea', '.mypy_cache', '.pytest_cache', 'node_modules', '.venv', 'venv', 'dist', 'build']);
+const DEPLOY_SUFFIXES = new Set(['.py', '.mpy']);
 
 let output: vscode.OutputChannel;
 let extensionContext: vscode.ExtensionContext;
+let explorerProvider: ZebraExplorerProvider | undefined;
+let setupPanel: vscode.WebviewPanel | undefined;
 
-export function activate(context: vscode.ExtensionContext) {
+interface ProjectStatus {
+  root: string;
+  valid: boolean;
+  hasMain: boolean;
+  hasUserMain: boolean;
+  hasRobotDir: boolean;
+  hasZebraJson: boolean;
+  hasRuntimeMain: boolean;
+  hasRuntimeRobot: boolean;
+  problems: string[];
+}
+
+export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   output = vscode.window.createOutputChannel('Zebra Flasher');
 
-  context.subscriptions.push(output);
+  explorerProvider = new ZebraExplorerProvider();
 
-  registerCommand(context, 'zebra.setupToolchain', setupToolchainCommand);
-  registerCommand(context, 'zebra.initializeProject', initializeProjectCommand);
-  registerCommand(context, 'zebra.projectStatus', projectStatusCommand);
-  registerCommand(context, 'zebra.projectSetup', projectSetupCommand);
-  registerCommand(context, 'zebra.detectSerialPort', detectSerialPortCommand);
-  registerCommand(context, 'zebra.openDriverHelp', openDriverHelp);
-  registerCommand(context, 'zebra.refreshRobotDriverCache', refreshRobotDriverCacheCommand);
-  registerCommand(context, 'zebra.installRobotDrivers', installRobotDriversCommand);
-  registerCommand(context, 'zebra.deployProject', deployProjectCommand);
-  registerCommand(context, 'zebra.flashFirmware', flashFirmwareCommand);
-  registerCommand(context, 'zebra.resetDevice', resetDeviceCommand);
-  registerCommand(context, 'zebra.openSerialMonitor', openSerialMonitorCommand);
+  context.subscriptions.push(output);
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('zebraExplorer', explorerProvider));
+
+  registerCommand(context, 'zebra.refreshExplorer', refreshExplorerCommand, false);
+  registerCommand(context, 'zebra.projectSetup', projectSetupCommand, false);
+  registerCommand(context, 'zebra.projectStatus', projectSetupCommand, false);
+
+  registerCommand(context, 'zebra.initProject', initializeProjectCommand, true);
+  registerCommand(context, 'zebra.initializeProject', initializeProjectCommand, true);
+
+  registerCommand(context, 'zebra.checkProject', checkProjectCommand, true);
+  registerCommand(context, 'zebra.setupToolchain', setupToolchainCommand, true);
+
+  registerCommand(context, 'zebra.refreshDriverCache', refreshRobotDriverCacheCommand, true);
+  registerCommand(context, 'zebra.refreshRobotDriverCache', refreshRobotDriverCacheCommand, true);
+  registerCommand(context, 'zebra.installRobotDrivers', installRobotDriversCommand, true);
+
+  registerCommand(context, 'zebra.detectSerialPort', detectSerialPortCommand, true);
+  registerCommand(context, 'zebra.deployProject', deployProjectCommand, true);
+  registerCommand(context, 'zebra.flashFirmware', flashFirmwareCommand, true);
+  registerCommand(context, 'zebra.resetDevice', resetDeviceCommand, true);
+  registerCommand(context, 'zebra.openSerialMonitor', openSerialMonitorCommand, true);
+  registerCommand(context, 'zebra.openDriverHelp', openDriverHelp, false);
+
+  void updateProjectContext();
+  vscode.workspace.onDidChangeWorkspaceFolders(() => void updateProjectContext(), null, context.subscriptions);
 
   output.appendLine('Zebra Flasher extension activated.');
 }
 
-export function deactivate() {}
+export function deactivate(): void {}
 
 function registerCommand(
   context: vscode.ExtensionContext,
   command: string,
-  callback: (...args: any[]) => any | Promise<any>,
-) {
+  callback: (...args: unknown[]) => unknown | Promise<unknown>,
+  showOutput: boolean,
+): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand(command, async (...args: any[]) => {
+    vscode.commands.registerCommand(command, async (...args: unknown[]) => {
       try {
-        if (!['zebra.projectSetup', 'zebra.projectStatus'].includes(command)) {
+        if (showOutput) {
           output.show(true);
         }
         await callback(...args);
-      } catch (err: any) {
-        const message = err?.message || String(err);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
         output.appendLine(`ERROR: ${message}`);
-        vscode.window.showErrorMessage(message);
+        void vscode.window.showErrorMessage(message);
+      } finally {
+        refreshExplorerCommand();
       }
     }),
   );
 }
 
+async function refreshExplorerCommand(): Promise<void> {
+  await updateProjectContext();
+  explorerProvider?.refresh();
+  if (setupPanel) {
+    await renderProjectSetupPanel(setupPanel);
+  }
+}
+
+async function projectSetupCommand(): Promise<void> {
+  if (setupPanel) {
+    setupPanel.reveal(vscode.ViewColumn.One);
+    await renderProjectSetupPanel(setupPanel);
+    return;
+  }
+
+  setupPanel = vscode.window.createWebviewPanel(
+    'zebraProjectSetup',
+    'Zebra Project Setup',
+    vscode.ViewColumn.One,
+    { enableScripts: true, retainContextWhenHidden: true },
+  );
+
+  setupPanel.onDidDispose(() => {
+    setupPanel = undefined;
+  });
+
+  setupPanel.webview.onDidReceiveMessage(async (message: { command?: string }) => {
+    if (!message.command) {
+      return;
+    }
+
+    const commandMap: Record<string, string> = {
+      refresh: 'zebra.refreshExplorer',
+      init: 'zebra.initializeProject',
+      setupToolchain: 'zebra.setupToolchain',
+      installDrivers: 'zebra.installRobotDrivers',
+      refreshDrivers: 'zebra.refreshRobotDriverCache',
+      detectPort: 'zebra.detectSerialPort',
+      checkProject: 'zebra.checkProject',
+      deploy: 'zebra.deployProject',
+      monitor: 'zebra.openSerialMonitor',
+      driverHelp: 'zebra.openDriverHelp',
+    };
+
+    const mapped = commandMap[message.command];
+    if (mapped) {
+      await vscode.commands.executeCommand(mapped);
+      await renderProjectSetupPanel(setupPanel!);
+    }
+  });
+
+  await renderProjectSetupPanel(setupPanel);
+}
+
+async function renderProjectSetupPanel(panel: vscode.WebviewPanel): Promise<void> {
+  const root = getWorkspaceRoot();
+  const status = root ? inspectProject(root) : undefined;
+  const toolPython = getToolPythonPath();
+  const toolchainReady = fs.existsSync(toolPython);
+
+  let serialSummary = 'Toolchain not installed';
+  if (toolchainReady) {
+    try {
+      const ports = await listSerialCandidates(toolPython);
+      serialSummary = ports.length ? `${ports.length} found; best ${ports[0].device} score=${ports[0].score}` : 'No serial ports found';
+    } catch (err: unknown) {
+      serialSummary = `Serial check failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  const rows = status
+    ? [
+        statusRow('Workspace', status.root, true),
+        statusRow('Toolchain venv', toolchainReady ? toolPython : 'missing', toolchainReady),
+        statusRow('Serial ports', serialSummary, !serialSummary.startsWith('Serial check failed')),
+        statusRow('main.py', status.hasMain ? 'found' : 'missing', status.hasMain),
+        statusRow('user_main.py', status.hasUserMain ? 'found' : 'optional / missing', true),
+        statusRow('robot/', status.hasRobotDir ? 'found' : 'missing', status.hasRobotDir),
+        statusRow('zebra.json', status.hasZebraJson ? 'found' : 'missing', status.hasZebraJson),
+        statusRow('resources/runtime/main.py', status.hasRuntimeMain ? 'found' : 'missing', status.hasRuntimeMain),
+        statusRow('resources/runtime/robot/', status.hasRuntimeRobot ? 'found' : 'missing', status.hasRuntimeRobot),
+      ].join('\n')
+    : '<div class="row bad"><span>No workspace</span><strong>Open a project folder first</strong></div>';
+
+  const problems = status?.problems.length
+    ? `<ul>${status.problems.map(problem => `<li>${escapeHtml(problem)}</li>`).join('')}</ul>`
+    : '<p>No project problems found.</p>';
+
+  panel.webview.html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 18px; }
+  h1 { margin-top: 0; }
+  .card { border: 1px solid var(--vscode-panel-border); border-radius: 10px; padding: 14px; margin: 12px 0; background: var(--vscode-sideBar-background); }
+  .row { display: flex; justify-content: space-between; gap: 18px; padding: 8px 0; border-bottom: 1px solid var(--vscode-panel-border); }
+  .row:last-child { border-bottom: none; }
+  .row span { color: var(--vscode-descriptionForeground); }
+  .row.good strong { color: #4ecf7a; }
+  .row.bad strong { color: #ff6b6b; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: none; padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  code { user-select: text; }
+</style>
+</head>
+<body>
+  <h1>Zebra Project Setup</h1>
+  <p>Project setup, toolchain checks, serial detection, and deploy controls are available here.</p>
+  <div class="card">${rows}</div>
+  <div class="card"><h2>Problems</h2>${problems}</div>
+  <div class="card">
+    <h2>Actions</h2>
+    <div class="actions">
+      <button onclick="send('refresh')">Refresh</button>
+      <button onclick="send('init')">Initialize Project</button>
+      <button onclick="send('setupToolchain')">Setup Toolchain</button>
+      <button onclick="send('installDrivers')">Install Robot Drivers</button>
+      <button onclick="send('refreshDrivers')">Refresh Driver Cache</button>
+      <button onclick="send('detectPort')">Detect Serial Port</button>
+      <button onclick="send('checkProject')">Check Python</button>
+      <button onclick="send('deploy')">Deploy</button>
+      <button onclick="send('monitor')">Serial Monitor</button>
+      <button onclick="send('driverHelp')">USB Driver Help</button>
+    </div>
+  </div>
+<script>
+  const vscode = acquireVsCodeApi();
+  function send(command) { vscode.postMessage({ command }); }
+</script>
+</body>
+</html>`;
+}
+
+function statusRow(label: string, value: string, ok: boolean): string {
+  return `<div class="row ${ok ? 'good' : 'bad'}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
 async function setupToolchainCommand(): Promise<string> {
   return vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: 'Zebra: Setting up MicroPython toolchain',
-      cancellable: false,
-    },
-    async progress => {
+    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Setting up MicroPython toolchain', cancellable: false },
+    async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
       await fs.promises.mkdir(extensionContext.globalStorageUri.fsPath, { recursive: true });
 
-      progress.report({ message: 'Creating Python virtual environment...' });
       const python = getConfiguredPythonCommand();
       const toolPython = getToolPythonPath();
       const venvDir = getVenvDir();
 
       if (!fs.existsSync(toolPython)) {
+        progress.report({ message: 'Creating Python virtual environment...' });
         await runCommand(python, ['-m', 'venv', venvDir]);
       }
 
@@ -91,11 +260,11 @@ async function setupToolchainCommand(): Promise<string> {
       progress.report({ message: 'Checking serial support...' });
       const ports = await listSerialCandidates(toolPython);
       output.appendLine(`Detected ${ports.length} serial device(s).`);
-      for (const p of ports) {
-        output.appendLine(`  - ${p.device} | ${p.description || p.manufacturer || 'serial device'} | score=${p.score}`);
-      }
+      ports.forEach((candidate: SerialCandidate) => {
+        output.appendLine(`  - ${candidate.device} | ${candidate.description || candidate.manufacturer || 'serial device'} | score=${candidate.score}`);
+      });
 
-      vscode.window.showInformationMessage('Zebra toolchain setup complete.');
+      void vscode.window.showInformationMessage('Zebra toolchain setup complete.');
       return toolPython;
     },
   );
@@ -103,28 +272,35 @@ async function setupToolchainCommand(): Promise<string> {
 
 async function initializeProjectCommand(): Promise<void> {
   const root = requireWorkspaceRoot();
-
   await setupToolchainCommand();
 
   await fs.promises.mkdir(root, { recursive: true });
 
   const zebraJson = path.join(root, 'zebra.json');
   if (!fs.existsSync(zebraJson)) {
-    const config = {
-      name: path.basename(root),
-      board: 'esp32',
-      framework: 'micropython',
-      runtime: 'zebra',
-      port: 'AUTO',
-      baud: 460800,
-      driverRepo: DEFAULT_DRIVER_REPO,
-    };
-    await fs.promises.writeFile(zebraJson, JSON.stringify(config, null, 2) + os.EOL, 'utf8');
+    await fs.promises.writeFile(
+      zebraJson,
+      JSON.stringify(
+        {
+          name: path.basename(root),
+          board: 'esp32',
+          framework: 'micropython',
+          runtime: 'zebra',
+          port: 'AUTO',
+          baud: getWorkspaceConfig<number>('flashBaud', 460800),
+          driverRepo: getWorkspaceConfig<string>('driverRepoUrl', DEFAULT_DRIVER_REPO),
+        },
+        null,
+        2,
+      ) + os.EOL,
+      'utf8',
+    );
     output.appendLine(`Created ${zebraJson}`);
   }
 
   const mainPy = path.join(root, 'main.py');
-  if (!fs.existsSync(mainPy) && !fs.existsSync(path.join(root, 'user_main.py'))) {
+  const userMainPy = path.join(root, 'user_main.py');
+  if (!fs.existsSync(mainPy) && !fs.existsSync(userMainPy)) {
     await fs.promises.writeFile(mainPy, starterMainPy(), 'utf8');
     output.appendLine(`Created ${mainPy}`);
   }
@@ -136,145 +312,69 @@ async function initializeProjectCommand(): Promise<void> {
   if (!fs.existsSync(settingsJson)) {
     await fs.promises.writeFile(
       settingsJson,
-      JSON.stringify(
-        {
-          'python.analysis.extraPaths': ['./robot'],
-          'zebra.port': 'AUTO',
-        },
-        null,
-        2,
-      ) + os.EOL,
+      JSON.stringify({ 'python.analysis.extraPaths': ['./robot'], 'zebra.port': 'AUTO' }, null, 2) + os.EOL,
       'utf8',
     );
     output.appendLine(`Created ${settingsJson}`);
   }
 
   await ensureRobotDriversInstalled(root);
-
-  vscode.window.showInformationMessage('Zebra project initialized.');
+  await updateProjectContext();
+  void vscode.window.showInformationMessage('Zebra project initialized.');
 }
 
-async function projectStatusCommand(): Promise<void> {
-  await projectSetupCommand();
-}
-
-async function projectSetupCommand(): Promise<void> {
-  await ProjectSetupPanel.show(
-    extensionContext.extensionUri,
-    getProjectSetupState,
-    runProjectSetupAction,
-  );
-}
-
-async function getProjectSetupState(): Promise<ProjectSetupState> {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || null;
-  const toolPython = getToolPythonPath();
-  const toolchainInstalled = fs.existsSync(toolPython);
-
-  let serialSummary = 'Toolchain not installed';
-  let ports: ProjectSetupState['serial']['ports'] = [];
-  let serialChecked = false;
-
-  if (toolchainInstalled) {
-    try {
-      const candidates = await listSerialCandidates(toolPython);
-      serialChecked = true;
-      ports = candidates.map(p => ({
-        device: p.device,
-        description: p.description,
-        manufacturer: p.manufacturer,
-        score: p.score,
-      }));
-      serialSummary = candidates.length
-        ? `${candidates.length} found, best: ${candidates[0].device}`
-        : 'No USB serial devices found';
-    } catch (err: any) {
-      serialChecked = true;
-      serialSummary = `Serial check failed: ${err?.message || err}`;
-    }
+async function checkProjectCommand(): Promise<void> {
+  const root = await requireUsableProject();
+  if (!root) {
+    return;
   }
 
-  return {
-    workspaceRoot: root,
-    project: root ? inspectProject(root) : null,
-    toolchain: {
-      installed: toolchainInstalled,
-      pythonPath: toolPython,
-    },
-    serial: {
-      checked: serialChecked,
-      summary: serialSummary,
-      ports,
-    },
-  };
-}
+  const toolPython = await ensureToolPython();
+  const files = await collectDeployFiles(root);
+  const pyFiles = files.filter((file: string) => file.endsWith('.py'));
 
-async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> {
-  switch (action) {
-    case 'refresh':
-      return;
-    case 'setupToolchain':
-      await setupToolchainCommand();
-      return;
-    case 'initializeProject':
-      await initializeProjectCommand();
-      return;
-    case 'installRobotDrivers':
-      await installRobotDriversCommand();
-      return;
-    case 'refreshRobotDriverCache':
-      await refreshRobotDriverCacheCommand();
-      return;
-    case 'detectSerialPort':
-      await detectSerialPortCommand();
-      return;
-    case 'openDriverHelp':
-      await openDriverHelp();
-      return;
-    case 'deployProject':
-      await deployProjectCommand();
-      return;
-    default:
-      throw new Error(`Unknown project setup action: ${action}`);
+  if (!pyFiles.length) {
+    void vscode.window.showWarningMessage('No Python files found to check.');
+    return;
   }
+
+  for (const file of pyFiles) {
+    output.appendLine(`Checking ${path.relative(root, file)}`);
+    await runCommand(toolPython, ['-m', 'py_compile', file]);
+  }
+
+  void vscode.window.showInformationMessage(`Python syntax check passed for ${pyFiles.length} file(s).`);
 }
 
 async function detectSerialPortCommand(): Promise<void> {
   const toolPython = await ensureToolPython();
   const port = await pickSerialPort(toolPython);
 
-  await vscode.workspace
-    .getConfiguration('zebra')
-    .update('port', port, vscode.ConfigurationTarget.Workspace);
-
+  await vscode.workspace.getConfiguration('zebra').update('port', port, vscode.ConfigurationTarget.Workspace);
   await updateZebraJson({ port });
 
-  vscode.window.showInformationMessage(`Zebra serial port set to ${port}`);
+  void vscode.window.showInformationMessage(`Zebra serial port set to ${port}`);
 }
 
 async function refreshRobotDriverCacheCommand(): Promise<void> {
   await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: 'Zebra: Refreshing robot driver cache',
-      cancellable: false,
-    },
-    async () => {
-      await refreshRobotDriverCache();
-    },
+    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Refreshing robot driver cache', cancellable: false },
+    async () => refreshRobotDriverCache(),
   );
-  vscode.window.showInformationMessage('Robot driver cache refreshed.');
+  void vscode.window.showInformationMessage('Robot driver cache refreshed.');
 }
 
 async function installRobotDriversCommand(): Promise<void> {
   const root = requireWorkspaceRoot();
   await ensureRobotDriversInstalled(root, true);
-  vscode.window.showInformationMessage('Robot drivers installed into project.');
+  void vscode.window.showInformationMessage('Robot drivers installed into project.');
 }
 
 async function deployProjectCommand(): Promise<void> {
   const root = await requireUsableProject();
-  if (!root) return;
+  if (!root) {
+    return;
+  }
 
   const toolPython = await ensureToolPython();
   let port = getWorkspaceConfig<string>('port', 'AUTO');
@@ -285,15 +385,13 @@ async function deployProjectCommand(): Promise<void> {
   }
 
   await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: 'Zebra: Deploying project to ESP32',
-      cancellable: false,
-    },
-    async progress => {
+    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Deploying project to ESP32', cancellable: false },
+    async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
       const stage = await buildStagedProject(root);
       const files = await collectDeployFiles(stage);
-      if (!files.length) throw new Error('No deployable .py or .mpy files found.');
+      if (!files.length) {
+        throw new Error('No deployable .py or .mpy files found.');
+      }
 
       output.appendLine(`Deploy stage: ${stage}`);
       output.appendLine(`Deploying ${files.length} file(s) to ${port}`);
@@ -314,7 +412,7 @@ async function deployProjectCommand(): Promise<void> {
     },
   );
 
-  vscode.window.showInformationMessage('Zebra project deployed.');
+  void vscode.window.showInformationMessage('Zebra project deployed.');
 }
 
 async function flashFirmwareCommand(): Promise<void> {
@@ -335,118 +433,332 @@ async function flashFirmwareCommand(): Promise<void> {
   });
 
   const firmware = picked?.[0]?.fsPath;
-  if (!firmware) return;
+  if (!firmware) {
+    return;
+  }
 
-  const baud = String(getWorkspaceConfig<number>('baud', 460800));
+  const baud = String(getWorkspaceConfig<number>('flashBaud', 460800));
 
   await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: 'Zebra: Flashing MicroPython firmware',
-      cancellable: false,
-    },
-    async progress => {
+    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Flashing MicroPython firmware', cancellable: false },
+    async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
       progress.report({ message: 'Erasing flash...' });
       await runCommand(toolPython, ['-m', 'esptool', '--chip', 'esp32', '--port', port, 'erase_flash']);
 
       progress.report({ message: 'Writing firmware...' });
-      await runCommand(toolPython, [
-        '-m',
-        'esptool',
-        '--chip',
-        'esp32',
-        '--port',
-        port,
-        '--baud',
-        baud,
-        'write_flash',
-        '-z',
-        '0x1000',
-        firmware,
-      ]);
+      await runCommand(toolPython, ['-m', 'esptool', '--chip', 'esp32', '--port', port, '--baud', baud, 'write_flash', '-z', '0x1000', firmware]);
     },
   );
 
-  vscode.window.showInformationMessage('Firmware flash complete.');
+  void vscode.window.showInformationMessage('Firmware flash complete.');
 }
 
 async function resetDeviceCommand(): Promise<void> {
   const toolPython = await ensureToolPython();
   const port = await resolveSerialPort(toolPython);
   await runCommand(toolPython, ['-m', 'mpremote', 'connect', port, 'reset'], true);
-  vscode.window.showInformationMessage(`Reset sent to ${port}.`);
+  void vscode.window.showInformationMessage(`Reset sent to ${port}.`);
 }
 
 async function openSerialMonitorCommand(): Promise<void> {
   const toolPython = await ensureToolPython();
   const port = await resolveSerialPort(toolPython);
-  const baud = String(getWorkspaceConfig<number>('monitorBaud', 115200));
-
-  const terminal = vscode.window.createTerminal({ name: `Zebra Monitor ${port}` });
+  const baud = String(getWorkspaceConfig<number>('serialMonitorBaud', 115200));
+  const terminal = vscode.window.createTerminal('Zebra Serial Monitor');
   terminal.show();
-  terminal.sendText(`${quoteShell(toolPython)} -m mpremote connect ${quoteShell(port)} repl`);
+  terminal.sendText(`${quoteShell(toolPython)} -m mpremote connect ${quoteShell(port)} resume repl --capture serial.log`, true);
+  output.appendLine(`Opened serial monitor for ${port} at ${baud} baud. Note: mpremote controls baud internally for REPL connections.`);
+}
 
-  output.appendLine(`Opened serial monitor on ${port} @ ${baud}.`);
+async function ensureToolPython(): Promise<string> {
+  const toolPython = getToolPythonPath();
+  if (!fs.existsSync(toolPython)) {
+    const choice = await vscode.window.showWarningMessage('Zebra toolchain is not installed. Run setup now?', 'Setup Toolchain', 'Cancel');
+    if (choice !== 'Setup Toolchain') {
+      throw new Error('Toolchain setup is required.');
+    }
+    return setupToolchainCommand();
+  }
+  return toolPython;
 }
 
 async function requireUsableProject(): Promise<string | undefined> {
-  const root = requireWorkspaceRoot();
-  const status = inspectProject(root);
+  const root = getWorkspaceRoot();
+  if (!root) {
+    void vscode.window.showErrorMessage('Open a Zebra project folder first.');
+    return undefined;
+  }
 
-  if (status.valid) return root;
+  const status = inspectProject(root);
+  if (status.valid) {
+    return root;
+  }
 
   const choice = await vscode.window.showWarningMessage(
-    `This workspace is missing Zebra project files:\n${status.problems.join('\n')}`,
+    `This does not look like a complete Zebra project:\n${status.problems.join('\n')}`,
+    { modal: true },
+    'Open Setup',
     'Initialize Project',
     'Continue Anyway',
     'Cancel',
   );
 
+  if (choice === 'Open Setup') {
+    await projectSetupCommand();
+    return undefined;
+  }
   if (choice === 'Initialize Project') {
     await initializeProjectCommand();
     return root;
   }
-  if (choice === 'Continue Anyway') return root;
+  if (choice === 'Continue Anyway') {
+    return root;
+  }
   return undefined;
 }
 
-function inspectProject(root: string) {
+function inspectProject(root: string): ProjectStatus {
   const hasMain = fs.existsSync(path.join(root, 'main.py'));
   const hasUserMain = fs.existsSync(path.join(root, 'user_main.py'));
   const hasRobotDir = fs.existsSync(path.join(root, 'robot'));
   const hasZebraJson = fs.existsSync(path.join(root, 'zebra.json'));
+  const hasRuntimeMain = fs.existsSync(getBundledRuntimeMain());
+  const hasRuntimeRobot = fs.existsSync(getBundledRobotDir());
+
   const problems: string[] = [];
+  if (!hasMain && !hasUserMain) problems.push('Missing main.py or user_main.py.');
+  if (!hasRobotDir) problems.push('Missing project robot/ driver directory.');
+  if (!hasZebraJson) problems.push('Missing zebra.json project config.');
+  if (!hasRuntimeMain) problems.push(`Missing bundled runtime main.py at ${getBundledRuntimeMain()}.`);
+  if (!hasRuntimeRobot) problems.push(`Missing bundled runtime robot/ at ${getBundledRobotDir()}.`);
 
-  if (!hasMain && !hasUserMain) problems.push('Missing main.py or user_main.py');
-  if (!hasRobotDir) problems.push('Missing robot/ driver directory');
-  if (!hasZebraJson) problems.push('Missing zebra.json project config');
-
-  return {
-    root,
-    valid: problems.length === 0,
-    hasMain,
-    hasUserMain,
-    hasRobotDir,
-    hasZebraJson,
-    problems,
-  };
+  return { root, valid: problems.length === 0, hasMain, hasUserMain, hasRobotDir, hasZebraJson, hasRuntimeMain, hasRuntimeRobot, problems };
 }
 
-async function ensureToolPython(): Promise<string> {
-  const toolPython = getToolPythonPath();
-  if (fs.existsSync(toolPython)) return toolPython;
-
-  const choice = await vscode.window.showWarningMessage(
-    'Zebra toolchain is not installed yet.',
-    'Setup Toolchain',
-    'Cancel',
-  );
-
-  if (choice !== 'Setup Toolchain') {
-    throw new Error('Toolchain setup is required.');
+async function ensureRobotDriversInstalled(projectRoot: string, force = false): Promise<void> {
+  const robotDst = path.join(projectRoot, 'robot');
+  if (fs.existsSync(robotDst) && !force) {
+    output.appendLine(`robot/ already exists: ${robotDst}`);
+    return;
   }
 
-  return setupToolchainCommand();
+  const source = await getRobotDriverSource();
+  if (!source || !fs.existsSync(source)) {
+    throw new Error('Could not find robot drivers in resources/runtime/robot, configured cache, or cloned repo cache.');
+  }
+
+  if (fs.existsSync(robotDst) && force) {
+    await fs.promises.rm(robotDst, { recursive: true, force: true });
+  }
+
+  await copyTree(source, robotDst);
+  output.appendLine(`Installed robot drivers from ${source} -> ${robotDst}`);
+}
+
+async function getRobotDriverSource(): Promise<string> {
+  const bundled = getBundledRobotDir();
+  if (fs.existsSync(bundled)) {
+    return bundled;
+  }
+
+  const configuredCache = getWorkspaceConfig<string>('driverCachePath', '');
+  if (configuredCache) {
+    const robot = path.join(configuredCache, 'robot');
+    if (fs.existsSync(robot)) return robot;
+    if (fs.existsSync(configuredCache)) return configuredCache;
+  }
+
+  const cacheRobot = path.join(getDriverCacheDir(), 'robot');
+  if (fs.existsSync(cacheRobot)) {
+    return cacheRobot;
+  }
+
+  await refreshRobotDriverCache();
+  if (fs.existsSync(cacheRobot)) {
+    return cacheRobot;
+  }
+
+  return '';
+}
+
+async function refreshRobotDriverCache(): Promise<void> {
+  const cacheDir = getDriverCacheDir();
+  await fs.promises.rm(cacheDir, { recursive: true, force: true });
+  await fs.promises.mkdir(path.dirname(cacheDir), { recursive: true });
+
+  const repo = getWorkspaceConfig<string>('driverRepoUrl', DEFAULT_DRIVER_REPO) || DEFAULT_DRIVER_REPO;
+  const branch = getWorkspaceConfig<string>('driverRepoBranch', '');
+  const args = branch ? ['clone', '--depth', '1', '--branch', branch, repo, cacheDir] : ['clone', '--depth', '1', repo, cacheDir];
+  await runCommand('git', args);
+  output.appendLine(`Driver cache cloned to ${cacheDir}`);
+}
+
+async function buildStagedProject(projectRoot: string): Promise<string> {
+  const stage = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'zbot_stage_'));
+  const runtimeMain = getRuntimeMainForProject(projectRoot);
+  const runtimeRobot = getRuntimeRobotForProject(projectRoot);
+  const userEntry = fs.existsSync(path.join(projectRoot, 'user_main.py')) ? path.join(projectRoot, 'user_main.py') : path.join(projectRoot, 'main.py');
+
+  if (!fs.existsSync(runtimeMain)) throw new Error(`Runtime main.py not found: ${runtimeMain}`);
+  if (!fs.existsSync(runtimeRobot)) throw new Error(`Runtime robot/ folder not found: ${runtimeRobot}`);
+  if (!fs.existsSync(userEntry)) throw new Error('Project must contain main.py or user_main.py.');
+
+  await fs.promises.copyFile(runtimeMain, path.join(stage, 'main.py'));
+  await copyTree(runtimeRobot, path.join(stage, 'robot'));
+  await fs.promises.copyFile(userEntry, path.join(stage, 'user_main.py'));
+
+  await copyProjectExtras(projectRoot, stage);
+  return stage;
+}
+
+function getRuntimeMainForProject(projectRoot: string): string {
+  const configuredRuntime = getWorkspaceConfig<string>('runtimePath', '');
+  if (configuredRuntime) return path.join(configuredRuntime, 'main.py');
+  const jsonRuntime = readZebraJsonRuntimePath(projectRoot);
+  if (jsonRuntime) return path.join(jsonRuntime, 'main.py');
+  return getBundledRuntimeMain();
+}
+
+function getRuntimeRobotForProject(projectRoot: string): string {
+  const configuredRuntime = getWorkspaceConfig<string>('runtimePath', '');
+  if (configuredRuntime) return path.join(configuredRuntime, 'robot');
+  const jsonRuntime = readZebraJsonRuntimePath(projectRoot);
+  if (jsonRuntime) return path.join(jsonRuntime, 'robot');
+  return getBundledRobotDir();
+}
+
+function readZebraJsonRuntimePath(projectRoot: string): string {
+  const file = path.join(projectRoot, 'zebra.json');
+  if (!fs.existsSync(file)) return '';
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8')) as { runtimePath?: string };
+    return data.runtimePath || '';
+  } catch {
+    return '';
+  }
+}
+
+async function copyProjectExtras(projectRoot: string, stage: string): Promise<void> {
+  const entries = await walk(projectRoot);
+  for (const source of entries) {
+    const rel = normalizePath(path.relative(projectRoot, source));
+    if (rel === 'main.py' || rel === 'user_main.py' || rel.startsWith('robot/')) continue;
+    if (shouldSkipPath(rel)) continue;
+    if (!DEPLOY_SUFFIXES.has(path.extname(source).toLowerCase())) continue;
+    const dest = path.join(stage, rel);
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    await fs.promises.copyFile(source, dest);
+  }
+}
+
+async function collectDeployFiles(root: string): Promise<string[]> {
+  const files = await walk(root);
+  return files
+    .filter((file: string) => DEPLOY_SUFFIXES.has(path.extname(file).toLowerCase()))
+    .filter((file: string) => !shouldSkipPath(normalizePath(path.relative(root, file))))
+    .sort((a: string, b: string) => normalizePath(path.relative(root, a)).localeCompare(normalizePath(path.relative(root, b))));
+}
+
+async function walk(root: string): Promise<string[]> {
+  const out: string[] = [];
+  if (!fs.existsSync(root)) return out;
+
+  async function visit(dir: string): Promise<void> {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      const rel = normalizePath(path.relative(root, full));
+      if (shouldSkipPath(rel)) continue;
+      if (entry.isDirectory()) {
+        await visit(full);
+      } else if (entry.isFile()) {
+        out.push(full);
+      }
+    }
+  }
+
+  await visit(root);
+  return out;
+}
+
+function shouldSkipPath(rel: string): boolean {
+  const parts = rel.split('/');
+  if (parts.some((part: string) => SKIP_DIRS.has(part))) return true;
+  const name = path.basename(rel).toLowerCase();
+  if (name.startsWith('teleop') && name.endsWith('.py')) return true;
+  return false;
+}
+
+async function ensureRemoteDirs(toolPython: string, port: string, rel: string, madeDirs: Set<string>): Promise<void> {
+  const parent = path.posix.dirname(rel);
+  if (!parent || parent === '.') return;
+
+  const parts = parent.split('/');
+  const built: string[] = [];
+  for (const part of parts) {
+    built.push(part);
+    const remote = `:/${built.join('/')}`;
+    if (madeDirs.has(remote)) continue;
+    await runCommand(toolPython, ['-m', 'mpremote', 'connect', port, 'fs', 'mkdir', remote], true);
+    madeDirs.add(remote);
+  }
+}
+
+async function updateZebraJson(patch: Record<string, unknown>): Promise<void> {
+  const root = getWorkspaceRoot();
+  if (!root) return;
+  const file = path.join(root, 'zebra.json');
+  let data: Record<string, unknown> = {};
+  if (fs.existsSync(file)) {
+    try {
+      data = JSON.parse(await fs.promises.readFile(file, 'utf8')) as Record<string, unknown>;
+    } catch {
+      data = {};
+    }
+  }
+  data = { ...data, ...patch };
+  await fs.promises.writeFile(file, JSON.stringify(data, null, 2) + os.EOL, 'utf8');
+}
+
+async function copyTree(src: string, dst: string): Promise<void> {
+  await fs.promises.mkdir(dst, { recursive: true });
+  const entries = await fs.promises.readdir(src, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+    const from = path.join(src, entry.name);
+    const to = path.join(dst, entry.name);
+    if (entry.isDirectory()) {
+      await copyTree(from, to);
+    } else if (entry.isFile()) {
+      await fs.promises.mkdir(path.dirname(to), { recursive: true });
+      await fs.promises.copyFile(from, to);
+    }
+  }
+}
+
+async function updateProjectContext(): Promise<void> {
+  const root = getWorkspaceRoot();
+  const active = root ? inspectProject(root).valid : false;
+  await vscode.commands.executeCommand('setContext', 'zebra.projectActive', active);
+}
+
+function requireWorkspaceRoot(): string {
+  const root = getWorkspaceRoot();
+  if (!root) throw new Error('Open a Zebra project folder first.');
+  return root;
+}
+
+function getWorkspaceRoot(): string | undefined {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+function getWorkspaceConfig<T>(key: string, fallback: T): T {
+  return vscode.workspace.getConfiguration('zebra').get<T>(key, fallback);
+}
+
+function getConfiguredPythonCommand(): string {
+  return getWorkspaceConfig<string>('pythonPath', process.platform === 'win32' ? 'python' : 'python3');
 }
 
 function getVenvDir(): string {
@@ -455,79 +767,10 @@ function getVenvDir(): string {
 
 function getToolPythonPath(): string {
   const venv = getVenvDir();
-  return process.platform === 'win32'
-    ? path.join(venv, 'Scripts', 'python.exe')
-    : path.join(venv, 'bin', 'python');
+  return process.platform === 'win32' ? path.join(venv, 'Scripts', 'python.exe') : path.join(venv, 'bin', 'python');
 }
 
-function getConfiguredPythonCommand(): string {
-  const configured = getWorkspaceConfig<string>('pythonPath', '');
-  if (configured && configured.trim()) return configured.trim();
-  return process.platform === 'win32' ? 'python' : 'python3';
-}
-
-async function refreshRobotDriverCache(): Promise<string> {
-  const cacheRoot = getDriverCacheRoot();
-  const repoDir = path.join(cacheRoot, 'Zebra_SOL_Flasher');
-  const repoUrl = getWorkspaceConfig<string>('driverRepo', DEFAULT_DRIVER_REPO) || DEFAULT_DRIVER_REPO;
-
-  await fs.promises.mkdir(cacheRoot, { recursive: true });
-
-  if (fs.existsSync(repoDir)) {
-    await runCommand('git', ['-C', repoDir, 'pull', '--ff-only'], true);
-  } else {
-    await runCommand('git', ['clone', repoUrl, repoDir]);
-  }
-
-  const robotDir = path.join(repoDir, 'robot');
-  if (!fs.existsSync(robotDir)) {
-    throw new Error(`Driver repo does not contain robot/: ${robotDir}`);
-  }
-
-  return repoDir;
-}
-
-async function ensureRobotDriversInstalled(root: string, force = false): Promise<void> {
-  const projectRobot = path.join(root, 'robot');
-
-  if (fs.existsSync(projectRobot) && !force) {
-    output.appendLine('robot/ already exists; leaving existing project drivers in place.');
-    return;
-  }
-
-  const cachedRobot = await findCachedRobotDir();
-  if (cachedRobot) {
-    await copyDir(cachedRobot, projectRobot, force);
-    output.appendLine(`Installed robot drivers from cache: ${cachedRobot}`);
-    return;
-  }
-
-  const repoDir = await refreshRobotDriverCache();
-  const repoRobot = path.join(repoDir, 'robot');
-  await copyDir(repoRobot, projectRobot, force);
-  output.appendLine(`Installed robot drivers from repo: ${repoRobot}`);
-}
-
-async function findCachedRobotDir(): Promise<string | undefined> {
-  const candidates = [
-    // Canonical bundled runtime location for this extension.
-    getBundledRobotDir(),
-
-    // User/global cache locations populated by Zebra: Refresh Robot Driver Cache.
-    path.join(getDriverCacheRoot(), 'robot'),
-    path.join(getDriverCacheRoot(), 'Zebra_SOL_Flasher', 'robot'),
-  ];
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
-      return candidate;
-    }
-  }
-
-  return undefined;
-}
-
-function getDriverCacheRoot(): string {
+function getDriverCacheDir(): string {
   return path.join(extensionContext.globalStorageUri.fsPath, 'driver-cache');
 }
 
@@ -541,183 +784,6 @@ function getBundledRobotDir(): string {
 
 function getBundledRuntimeMain(): string {
   return path.join(getBundledRuntimeDir(), 'main.py');
-}
-
-async function buildStagedProject(root: string): Promise<string> {
-  const stage = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'zbot_stage_'));
-
-  const sourceMain = fs.existsSync(path.join(root, 'user_main.py'))
-    ? path.join(root, 'user_main.py')
-    : path.join(root, 'main.py');
-
-  if (!fs.existsSync(sourceMain)) {
-    throw new Error('Project must contain main.py or user_main.py.');
-  }
-
-  const robotDir = path.join(root, 'robot');
-  if (!fs.existsSync(robotDir)) {
-    throw new Error('Project must contain robot/ before deploy. Run Zebra: Initialize Project.');
-  }
-
-  const runtimeMain = await findRuntimeMain(root);
-  if (runtimeMain) {
-    await fs.promises.copyFile(runtimeMain, path.join(stage, 'main.py'));
-    await fs.promises.copyFile(sourceMain, path.join(stage, 'user_main.py'));
-  } else if (path.basename(sourceMain) === 'user_main.py' && fs.existsSync(path.join(root, 'main.py'))) {
-    await fs.promises.copyFile(path.join(root, 'main.py'), path.join(stage, 'main.py'));
-    await fs.promises.copyFile(sourceMain, path.join(stage, 'user_main.py'));
-  } else {
-    await fs.promises.copyFile(sourceMain, path.join(stage, 'main.py'));
-  }
-
-  await copyDir(robotDir, path.join(stage, 'robot'), true);
-
-  for (const entry of await fs.promises.readdir(root, { withFileTypes: true })) {
-    if (shouldSkipTopLevel(entry.name)) continue;
-    const from = path.join(root, entry.name);
-    const to = path.join(stage, entry.name);
-    if (entry.isDirectory()) {
-      await copyProjectTree(from, to);
-    } else if (isDeployFile(from) && !['main.py', 'user_main.py'].includes(entry.name)) {
-      await fs.promises.copyFile(from, to);
-    }
-  }
-
-  return stage;
-}
-
-async function findRuntimeMain(root: string): Promise<string | undefined> {
-  const candidates = [
-    // Canonical bundled runtime location for this extension.
-    getBundledRuntimeMain(),
-
-    // Optional project override for advanced/local runtime experiments.
-    path.join(root, '.zebra', 'runtime', 'main.py'),
-  ];
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-
-  return undefined;
-}
-
-async function collectDeployFiles(root: string): Promise<string[]> {
-  const files: string[] = [];
-
-  async function walk(dir: string) {
-    for (const entry of await fs.promises.readdir(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (isDeployFile(full)) files.push(full);
-    }
-  }
-
-  await walk(root);
-  return files.sort((a, b) => normalizePath(path.relative(root, a)).localeCompare(normalizePath(path.relative(root, b))));
-}
-
-async function ensureRemoteDirs(toolPython: string, port: string, relFile: string, madeDirs: Set<string>): Promise<void> {
-  const parent = path.posix.dirname(relFile);
-  if (!parent || parent === '.') return;
-
-  const parts = parent.split('/');
-  let current = '';
-  for (const part of parts) {
-    current += `/${part}`;
-    if (madeDirs.has(current)) continue;
-    await runCommand(toolPython, ['-m', 'mpremote', 'connect', port, 'fs', 'mkdir', `:${current}`], true);
-    madeDirs.add(current);
-  }
-}
-
-const SKIP_DIRS = new Set([
-  '__pycache__',
-  '.git',
-  '.idea',
-  '.vscode',
-  '.mypy_cache',
-  '.pytest_cache',
-  'node_modules',
-  '.venv',
-  'venv',
-  'dist',
-  'build',
-]);
-
-function shouldSkipTopLevel(name: string): boolean {
-  return ['robot', 'main.py', 'user_main.py', 'zebra.json'].includes(name) || SKIP_DIRS.has(name) || name.startsWith('.');
-}
-
-async function copyProjectTree(src: string, dst: string): Promise<void> {
-  for (const entry of await fs.promises.readdir(src, { withFileTypes: true })) {
-    if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
-    const from = path.join(src, entry.name);
-    const to = path.join(dst, entry.name);
-    if (entry.isDirectory()) {
-      await copyProjectTree(from, to);
-    } else if (isDeployFile(from)) {
-      await fs.promises.mkdir(path.dirname(to), { recursive: true });
-      await fs.promises.copyFile(from, to);
-    }
-  }
-}
-
-async function copyDir(src: string, dst: string, overwrite: boolean): Promise<void> {
-  if (overwrite && fs.existsSync(dst)) {
-    await fs.promises.rm(dst, { recursive: true, force: true });
-  }
-  await fs.promises.mkdir(dst, { recursive: true });
-
-  for (const entry of await fs.promises.readdir(src, { withFileTypes: true })) {
-    if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
-    const from = path.join(src, entry.name);
-    const to = path.join(dst, entry.name);
-    if (entry.isDirectory()) {
-      await copyDir(from, to, overwrite);
-    } else if (isDeployFile(from) || entry.name === '__init__.py') {
-      await fs.promises.mkdir(path.dirname(to), { recursive: true });
-      await fs.promises.copyFile(from, to);
-    }
-  }
-}
-
-function isDeployFile(file: string): boolean {
-  const ext = path.extname(file).toLowerCase();
-  const base = path.basename(file).toLowerCase();
-  if (!['.py', '.mpy'].includes(ext)) return false;
-  if (base.startsWith('teleop') && ext === '.py') return false;
-  return true;
-}
-
-async function updateZebraJson(patch: Record<string, any>): Promise<void> {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) return;
-
-  const file = path.join(root, 'zebra.json');
-  let data: Record<string, any> = {};
-  if (fs.existsSync(file)) {
-    try {
-      data = JSON.parse(await fs.promises.readFile(file, 'utf8'));
-    } catch {
-      data = {};
-    }
-  }
-
-  data = { ...data, ...patch };
-  await fs.promises.writeFile(file, JSON.stringify(data, null, 2) + os.EOL, 'utf8');
-}
-
-function requireWorkspaceRoot(): string {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) throw new Error('Open a Zebra project folder first.');
-  return root;
-}
-
-function getWorkspaceConfig<T>(key: string, fallback: T): T {
-  const config = vscode.workspace.getConfiguration('zebra');
-  return config.get<T>(key, fallback);
 }
 
 function isAutoPort(port: string): boolean {
@@ -741,29 +807,30 @@ function runCommand(command: string, args: string[], ignoreFailure = false): Pro
       shell: false,
       cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
       env: process.env,
+      windowsHide: true,
     });
 
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', data => {
+    child.stdout.on('data', (data: Buffer) => {
       const text = data.toString();
       stdout += text;
       output.append(text);
     });
 
-    child.stderr.on('data', data => {
+    child.stderr.on('data', (data: Buffer) => {
       const text = data.toString();
       stderr += text;
       output.append(text);
     });
 
-    child.on('error', err => {
+    child.on('error', (err: Error) => {
       if (ignoreFailure) resolve(stdout.trim());
       else reject(err);
     });
 
-    child.on('close', code => {
+    child.on('close', (code: number | null) => {
       if (code !== 0 && !ignoreFailure) {
         reject(new Error(`Command failed with code ${code}: ${command} ${args.join(' ')}\n${stderr}`));
         return;
@@ -774,5 +841,82 @@ function runCommand(command: string, args: string[], ignoreFailure = false): Pro
 }
 
 function starterMainPy(): string {
-  return `import uasyncio as asyncio\nimport gc\n\n\nasync def main(zbot):\n    gc.collect()\n\n    zbot.display("ZebraBot", "Ready")\n\n    while True:\n        await asyncio.sleep_ms(100)\n`;
+  return `import uasyncio as asyncio
+import gc
+
+
+async def main(zbot):
+    gc.collect()
+
+    zbot.display("ZebraBot", "Ready")
+
+    while True:
+        await asyncio.sleep_ms(100)
+`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
+  private readonly emitter = new vscode.EventEmitter<ZebraTreeItem | undefined | null | void>();
+  readonly onDidChangeTreeData = this.emitter.event;
+
+  refresh(): void {
+    this.emitter.fire();
+  }
+
+  getTreeItem(element: ZebraTreeItem): vscode.TreeItem {
+    return element;
+  }
+
+  getChildren(element?: ZebraTreeItem): Thenable<ZebraTreeItem[]> {
+    if (element) {
+      return Promise.resolve([]);
+    }
+
+    const root = getWorkspaceRoot();
+    if (!root) {
+      return Promise.resolve([
+        new ZebraTreeItem('Open a folder to start', 'No workspace', vscode.TreeItemCollapsibleState.None, 'info'),
+        commandItem('Project Setup', 'zebra.projectSetup', 'gear'),
+      ]);
+    }
+
+    const status = inspectProject(root);
+    const items: ZebraTreeItem[] = [
+      new ZebraTreeItem(status.valid ? 'Project Ready' : 'Project Needs Setup', path.basename(root), vscode.TreeItemCollapsibleState.None, status.valid ? 'pass' : 'warning'),
+      commandItem('Project Setup', 'zebra.projectSetup', 'gear'),
+      commandItem('Initialize Project', 'zebra.initializeProject', 'new-folder'),
+      commandItem('Setup Toolchain', 'zebra.setupToolchain', 'tools'),
+      commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),
+      commandItem('Deploy Project', 'zebra.deployProject', 'cloud-upload'),
+      commandItem('Serial Monitor', 'zebra.openSerialMonitor', 'terminal'),
+      commandItem('Flash Firmware', 'zebra.flashFirmware', 'zap'),
+    ];
+
+    return Promise.resolve(items);
+  }
+}
+
+class ZebraTreeItem extends vscode.TreeItem {
+  constructor(label: string, description: string, collapsibleState: vscode.TreeItemCollapsibleState, icon?: string) {
+    super(label, collapsibleState);
+    this.description = description;
+    if (icon) {
+      this.iconPath = new vscode.ThemeIcon(icon);
+    }
+  }
+}
+
+function commandItem(label: string, command: string, icon: string): ZebraTreeItem {
+  const item = new ZebraTreeItem(label, '', vscode.TreeItemCollapsibleState.None, icon);
+  item.command = { command, title: label };
+  return item;
 }
