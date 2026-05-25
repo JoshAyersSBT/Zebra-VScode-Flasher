@@ -8,6 +8,8 @@ export interface ProjectSetupState {
     hasUserMain: boolean;
     hasRobotDir: boolean;
     hasZebraJson: boolean;
+    hasRuntimeMain: boolean;
+    hasRuntimeRobot: boolean;
     problems: string[];
   } | null;
   toolchain: {
@@ -16,6 +18,7 @@ export interface ProjectSetupState {
   };
   serial: {
     checked: boolean;
+    configuredPort: string;
     summary: string;
     ports: Array<{
       device: string;
@@ -29,12 +32,15 @@ export interface ProjectSetupState {
 export type ProjectSetupAction =
   | 'refresh'
   | 'setupToolchain'
+  | 'installPython'
   | 'initializeProject'
   | 'installRobotDrivers'
   | 'refreshRobotDriverCache'
   | 'detectSerialPort'
+  | 'checkProject'
   | 'openDriverHelp'
-  | 'deployProject';
+  | 'deployProject'
+  | 'openSerialMonitor';
 
 export class ProjectSetupPanel {
   private static currentPanel: ProjectSetupPanel | undefined;
@@ -155,11 +161,11 @@ export class ProjectSetupPanel {
       --warn: #d29922;
     }
     body { margin: 0; padding: 20px; color: var(--fg); background: var(--bg); font-family: var(--vscode-font-family); }
-    .wrap { max-width: 980px; margin: 0 auto; }
+    .wrap { max-width: 1040px; margin: 0 auto; }
     h1 { margin: 0 0 6px; font-size: 24px; }
     .sub { color: var(--muted); margin-bottom: 18px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(275px, 1fr)); gap: 14px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
     .card h2 { margin: 0 0 10px; font-size: 16px; }
     .status { display: inline-flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; }
     .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; }
@@ -167,18 +173,22 @@ export class ProjectSetupPanel {
     .bad .dot { background: var(--bad); }
     .warn .dot { background: var(--warn); }
     .rows { margin-top: 12px; display: grid; gap: 7px; }
-    .row { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid color-mix(in srgb, var(--border), transparent 45%); padding-bottom: 6px; }
+    .row { display: grid; grid-template-columns: minmax(86px, .45fr) minmax(0, 1fr); gap: 12px; border-bottom: 1px solid color-mix(in srgb, var(--border), transparent 45%); padding-bottom: 6px; }
     .row span:first-child { color: var(--muted); }
+    .row strong { min-width: 0; overflow-wrap: anywhere; text-align: right; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
     button { background: var(--button); color: var(--button-fg); border: none; border-radius: 6px; padding: 8px 10px; cursor: pointer; font: inherit; }
     button:hover { background: var(--button-hover); }
     button.secondary { background: transparent; border: 1px solid var(--border); color: var(--fg); }
     button:disabled { opacity: .55; cursor: not-allowed; }
     .problems { margin: 10px 0 0; padding-left: 18px; color: var(--bad); }
-    .banner { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); }
+    .problems .empty { color: var(--muted); }
+    .banner { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); }
     .banner.error { color: var(--bad); border-color: var(--bad); }
     .ports { max-height: 170px; overflow: auto; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
     .port { font-size: 12px; color: var(--muted); margin-bottom: 7px; }
+    .empty { color: var(--muted); font-size: 12px; }
+    .command-card { margin-top: 14px; }
     code { color: var(--vscode-textPreformat-foreground); }
   </style>
 </head>
@@ -194,8 +204,9 @@ export class ProjectSetupPanel {
         <div class="rows" id="projectRows"></div>
         <ul class="problems" id="problems"></ul>
         <div class="actions">
-          <button data-action="initializeProject">Initialize Project</button>
-          <button class="secondary" data-action="installRobotDrivers">Install Robot Drivers</button>
+          <button data-action="initializeProject" data-requires="workspace">Initialize Project</button>
+          <button class="secondary" data-action="installRobotDrivers" data-requires="workspace">Install Drivers</button>
+          <button class="secondary" data-action="checkProject" data-requires="project-toolchain">Check Python</button>
         </div>
       </section>
 
@@ -205,6 +216,7 @@ export class ProjectSetupPanel {
         <div class="rows" id="toolRows"></div>
         <div class="actions">
           <button data-action="setupToolchain">Setup Toolchain</button>
+          <button class="secondary" data-action="installPython">Install Python</button>
           <button class="secondary" data-action="openDriverHelp">USB Driver Help</button>
         </div>
       </section>
@@ -215,16 +227,17 @@ export class ProjectSetupPanel {
         <div class="rows" id="serialRows"></div>
         <div class="ports" id="ports"></div>
         <div class="actions">
-          <button data-action="detectSerialPort">Detect Serial Port</button>
+          <button data-action="detectSerialPort" data-requires="toolchain">Detect Serial Port</button>
           <button class="secondary" data-action="refresh">Refresh</button>
         </div>
       </section>
     </div>
 
-    <section class="card" style="margin-top:14px;">
+    <section class="card command-card">
       <h2>Commands</h2>
       <div class="actions">
-        <button data-action="deployProject">Deploy Project</button>
+        <button data-action="deployProject" data-requires="project-toolchain">Deploy Project</button>
+        <button class="secondary" data-action="openSerialMonitor" data-requires="toolchain">Serial Monitor</button>
         <button class="secondary" data-action="refreshRobotDriverCache">Refresh Driver Cache</button>
         <button class="secondary" data-action="refresh">Refresh Status</button>
       </div>
@@ -235,10 +248,11 @@ export class ProjectSetupPanel {
     const vscode = acquireVsCodeApi();
     const banner = document.getElementById('banner');
     let busy = false;
+    let currentState = null;
 
     document.querySelectorAll('button[data-action]').forEach(btn => {
       btn.addEventListener('click', () => {
-        if (busy) return;
+        if (busy || btn.disabled) return;
         vscode.postMessage({ action: btn.dataset.action });
       });
     });
@@ -249,12 +263,13 @@ export class ProjectSetupPanel {
         busy = !!msg.busy;
         banner.textContent = msg.message || '';
         banner.classList.toggle('error', !!msg.isError);
-        document.querySelectorAll('button').forEach(b => b.disabled = busy);
+        updateButtons();
       }
       if (msg.type === 'state') render(msg.state);
     });
 
     function render(state) {
+      currentState = state;
       const project = state.project;
       const root = state.workspaceRoot || 'No workspace open';
       setBadge('projectBadge', project && project.valid ? 'ok' : 'bad', project ? (project.valid ? 'Ready' : 'Needs setup') : 'No workspace');
@@ -264,14 +279,24 @@ export class ProjectSetupPanel {
         ['user_main.py', project?.hasUserMain ? 'Found' : 'Missing'],
         ['robot/', project?.hasRobotDir ? 'Found' : 'Missing'],
         ['zebra.json', project?.hasZebraJson ? 'Found' : 'Missing'],
+        ['runtime main.py', project?.hasRuntimeMain ? 'Found' : 'Missing'],
+        ['runtime robot/', project?.hasRuntimeRobot ? 'Found' : 'Missing'],
       ]);
+
       const problems = document.getElementById('problems');
       problems.innerHTML = '';
-      (project?.problems || []).forEach(p => {
+      const problemList = project?.problems || [];
+      problemList.forEach(p => {
         const li = document.createElement('li');
         li.textContent = p;
         problems.appendChild(li);
       });
+      if (!problemList.length && project) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = 'No project problems found.';
+        problems.appendChild(li);
+      }
 
       setBadge('toolBadge', state.toolchain.installed ? 'ok' : 'bad', state.toolchain.installed ? 'Installed' : 'Missing');
       rows('toolRows', [
@@ -281,15 +306,26 @@ export class ProjectSetupPanel {
 
       const serialKind = state.serial.ports.length ? 'ok' : (state.serial.checked ? 'bad' : 'warn');
       setBadge('serialBadge', serialKind, state.serial.summary);
-      rows('serialRows', [['Summary', state.serial.summary]]);
+      rows('serialRows', [
+        ['Configured', state.serial.configuredPort || 'AUTO'],
+        ['Summary', state.serial.summary],
+      ]);
       const ports = document.getElementById('ports');
       ports.innerHTML = '';
+      if (!state.serial.ports.length) {
+        const div = document.createElement('div');
+        div.className = 'empty';
+        div.textContent = state.toolchain.installed ? 'No detected ports to show.' : 'Serial detection needs the toolchain.';
+        ports.appendChild(div);
+      }
       state.serial.ports.forEach(p => {
         const div = document.createElement('div');
         div.className = 'port';
-        div.textContent = p.device + ' — ' + (p.description || p.manufacturer || 'serial device') + ' — score=' + p.score;
+        div.textContent = p.device + ' - ' + (p.description || p.manufacturer || 'serial device') + ' - score=' + p.score;
         ports.appendChild(div);
       });
+
+      updateButtons();
     }
 
     function setBadge(id, kind, text) {
@@ -308,6 +344,21 @@ export class ProjectSetupPanel {
         row.children[0].textContent = k;
         row.children[1].textContent = v;
         el.appendChild(row);
+      });
+    }
+
+    function updateButtons() {
+      const hasWorkspace = !!currentState?.workspaceRoot;
+      const projectReady = !!currentState?.project?.valid;
+      const toolchainReady = !!currentState?.toolchain?.installed;
+
+      document.querySelectorAll('button[data-action]').forEach(button => {
+        const requirement = button.dataset.requires || '';
+        let disabled = busy;
+        if (requirement === 'workspace') disabled = disabled || !hasWorkspace;
+        if (requirement === 'toolchain') disabled = disabled || !toolchainReady;
+        if (requirement === 'project-toolchain') disabled = disabled || !projectReady || !toolchainReady;
+        button.disabled = disabled;
       });
     }
   </script>

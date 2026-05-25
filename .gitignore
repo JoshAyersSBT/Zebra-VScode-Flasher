@@ -2,3 +2,4 @@ out/
 node_modules/
 .zebra-venv/
 .vsix
+.vscode-test-*/

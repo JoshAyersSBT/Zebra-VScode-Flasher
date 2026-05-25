@@ -11,6 +11,11 @@ import {
   resolveSerialPort,
   openDriverHelp,
 } from './serial';
+import {
+  ProjectSetupAction,
+  ProjectSetupPanel,
+  ProjectSetupState,
+} from './projectSetupPanel';
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git';
@@ -20,7 +25,6 @@ const DEPLOY_SUFFIXES = new Set(['.py', '.mpy']);
 let output: vscode.OutputChannel;
 let extensionContext: vscode.ExtensionContext;
 let explorerProvider: ZebraExplorerProvider | undefined;
-let setupPanel: vscode.WebviewPanel | undefined;
 
 interface ProjectStatus {
   root: string;
@@ -52,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   registerCommand(context, 'zebra.checkProject', checkProjectCommand, true);
   registerCommand(context, 'zebra.setupToolchain', setupToolchainCommand, true);
+  registerCommand(context, 'zebra.installPython', installPythonCommand, true);
 
   registerCommand(context, 'zebra.refreshDriverCache', refreshRobotDriverCacheCommand, true);
   registerCommand(context, 'zebra.refreshRobotDriverCache', refreshRobotDriverCacheCommand, true);
@@ -99,141 +104,121 @@ function registerCommand(
 async function refreshExplorerCommand(): Promise<void> {
   await updateProjectContext();
   explorerProvider?.refresh();
-  if (setupPanel) {
-    await renderProjectSetupPanel(setupPanel);
-  }
 }
 
 async function projectSetupCommand(): Promise<void> {
-  if (setupPanel) {
-    setupPanel.reveal(vscode.ViewColumn.One);
-    await renderProjectSetupPanel(setupPanel);
-    return;
-  }
-
-  setupPanel = vscode.window.createWebviewPanel(
-    'zebraProjectSetup',
-    'Zebra Project Setup',
-    vscode.ViewColumn.One,
-    { enableScripts: true, retainContextWhenHidden: true },
-  );
-
-  setupPanel.onDidDispose(() => {
-    setupPanel = undefined;
-  });
-
-  setupPanel.webview.onDidReceiveMessage(async (message: { command?: string }) => {
-    if (!message.command) {
-      return;
-    }
-
-    const commandMap: Record<string, string> = {
-      refresh: 'zebra.refreshExplorer',
-      init: 'zebra.initializeProject',
-      setupToolchain: 'zebra.setupToolchain',
-      installDrivers: 'zebra.installRobotDrivers',
-      refreshDrivers: 'zebra.refreshRobotDriverCache',
-      detectPort: 'zebra.detectSerialPort',
-      checkProject: 'zebra.checkProject',
-      deploy: 'zebra.deployProject',
-      monitor: 'zebra.openSerialMonitor',
-      driverHelp: 'zebra.openDriverHelp',
-    };
-
-    const mapped = commandMap[message.command];
-    if (mapped) {
-      await vscode.commands.executeCommand(mapped);
-      await renderProjectSetupPanel(setupPanel!);
-    }
-  });
-
-  await renderProjectSetupPanel(setupPanel);
+  await ProjectSetupPanel.show(extensionContext.extensionUri, getProjectSetupState, runProjectSetupAction);
 }
 
-async function renderProjectSetupPanel(panel: vscode.WebviewPanel): Promise<void> {
+async function getProjectSetupState(): Promise<ProjectSetupState> {
   const root = getWorkspaceRoot();
   const status = root ? inspectProject(root) : undefined;
   const toolPython = getToolPythonPath();
   const toolchainReady = fs.existsSync(toolPython);
+  const configuredPort = getWorkspaceConfig<string>('port', 'AUTO');
+  const serialPorts: ProjectSetupState['serial']['ports'] = [];
+  let serialSummary = toolchainReady ? 'Not checked' : 'Install the toolchain first';
+  let serialChecked = false;
 
-  let serialSummary = 'Toolchain not installed';
   if (toolchainReady) {
+    serialChecked = true;
     try {
       const ports = await listSerialCandidates(toolPython);
-      serialSummary = ports.length ? `${ports.length} found; best ${ports[0].device} score=${ports[0].score}` : 'No serial ports found';
+      serialPorts.push(
+        ...ports.map((candidate: SerialCandidate) => ({
+          device: candidate.device,
+          description: candidate.description || '',
+          manufacturer: candidate.manufacturer || '',
+          score: candidate.score,
+        })),
+      );
+      serialSummary = ports.length
+        ? `${ports.length} port${ports.length === 1 ? '' : 's'} found; best match ${ports[0].device}`
+        : 'No serial ports found';
     } catch (err: unknown) {
       serialSummary = `Serial check failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
-  const rows = status
-    ? [
-        statusRow('Workspace', status.root, true),
-        statusRow('Toolchain venv', toolchainReady ? toolPython : 'missing', toolchainReady),
-        statusRow('Serial ports', serialSummary, !serialSummary.startsWith('Serial check failed')),
-        statusRow('main.py', status.hasMain ? 'found' : 'missing', status.hasMain),
-        statusRow('user_main.py', status.hasUserMain ? 'found' : 'optional / missing', true),
-        statusRow('robot/', status.hasRobotDir ? 'found' : 'missing', status.hasRobotDir),
-        statusRow('zebra.json', status.hasZebraJson ? 'found' : 'missing', status.hasZebraJson),
-        statusRow('resources/runtime/main.py', status.hasRuntimeMain ? 'found' : 'missing', status.hasRuntimeMain),
-        statusRow('resources/runtime/robot/', status.hasRuntimeRobot ? 'found' : 'missing', status.hasRuntimeRobot),
-      ].join('\n')
-    : '<div class="row bad"><span>No workspace</span><strong>Open a project folder first</strong></div>';
-
-  const problems = status?.problems.length
-    ? `<ul>${status.problems.map(problem => `<li>${escapeHtml(problem)}</li>`).join('')}</ul>`
-    : '<p>No project problems found.</p>';
-
-  panel.webview.html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 18px; }
-  h1 { margin-top: 0; }
-  .card { border: 1px solid var(--vscode-panel-border); border-radius: 10px; padding: 14px; margin: 12px 0; background: var(--vscode-sideBar-background); }
-  .row { display: flex; justify-content: space-between; gap: 18px; padding: 8px 0; border-bottom: 1px solid var(--vscode-panel-border); }
-  .row:last-child { border-bottom: none; }
-  .row span { color: var(--vscode-descriptionForeground); }
-  .row.good strong { color: #4ecf7a; }
-  .row.bad strong { color: #ff6b6b; }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: none; padding: 8px 10px; border-radius: 6px; cursor: pointer; }
-  button:hover { background: var(--vscode-button-hoverBackground); }
-  code { user-select: text; }
-</style>
-</head>
-<body>
-  <h1>Zebra Project Setup</h1>
-  <p>Project setup, toolchain checks, serial detection, and deploy controls are available here.</p>
-  <div class="card">${rows}</div>
-  <div class="card"><h2>Problems</h2>${problems}</div>
-  <div class="card">
-    <h2>Actions</h2>
-    <div class="actions">
-      <button onclick="send('refresh')">Refresh</button>
-      <button onclick="send('init')">Initialize Project</button>
-      <button onclick="send('setupToolchain')">Setup Toolchain</button>
-      <button onclick="send('installDrivers')">Install Robot Drivers</button>
-      <button onclick="send('refreshDrivers')">Refresh Driver Cache</button>
-      <button onclick="send('detectPort')">Detect Serial Port</button>
-      <button onclick="send('checkProject')">Check Python</button>
-      <button onclick="send('deploy')">Deploy</button>
-      <button onclick="send('monitor')">Serial Monitor</button>
-      <button onclick="send('driverHelp')">USB Driver Help</button>
-    </div>
-  </div>
-<script>
-  const vscode = acquireVsCodeApi();
-  function send(command) { vscode.postMessage({ command }); }
-</script>
-</body>
-</html>`;
+  return {
+    workspaceRoot: root || null,
+    project: status
+      ? {
+          valid: status.valid,
+          hasMain: status.hasMain,
+          hasUserMain: status.hasUserMain,
+          hasRobotDir: status.hasRobotDir,
+          hasZebraJson: status.hasZebraJson,
+          hasRuntimeMain: status.hasRuntimeMain,
+          hasRuntimeRobot: status.hasRuntimeRobot,
+          problems: status.problems,
+        }
+      : null,
+    toolchain: {
+      installed: toolchainReady,
+      pythonPath: toolPython,
+    },
+    serial: {
+      checked: serialChecked,
+      configuredPort,
+      summary: serialSummary,
+      ports: serialPorts,
+    },
+  };
 }
 
-function statusRow(label: string, value: string, ok: boolean): string {
-  return `<div class="row ${ok ? 'good' : 'bad'}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> {
+  switch (action) {
+    case 'refresh':
+      await refreshExplorerCommand();
+      break;
+    case 'setupToolchain':
+      await setupToolchainCommand();
+      break;
+    case 'installPython':
+      await installPythonCommand();
+      break;
+    case 'initializeProject':
+      await initializeProjectCommand();
+      break;
+    case 'installRobotDrivers':
+      await installRobotDriversCommand();
+      break;
+    case 'refreshRobotDriverCache':
+      await refreshRobotDriverCacheCommand();
+      break;
+    case 'detectSerialPort':
+      await detectSerialPortCommand();
+      break;
+    case 'checkProject':
+      await checkProjectCommand();
+      break;
+    case 'deployProject':
+      await deployProjectCommand();
+      break;
+    case 'openSerialMonitor':
+      await openSerialMonitorCommand();
+      break;
+    case 'openDriverHelp':
+      await openDriverHelp();
+      break;
+  }
+
+  await updateProjectContext();
+  explorerProvider?.refresh();
+}
+
+
+async function installPythonCommand(): Promise<void> {
+  output.show(true);
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Installing Python 3', cancellable: false },
+    async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
+      const python = await resolveOrInstallPythonCommand(progress);
+      output.appendLine(`Python ready: ${python.display}`);
+      void vscode.window.showInformationMessage(`Python is ready: ${python.display}`);
+    },
+  );
 }
 
 async function setupToolchainCommand(): Promise<string> {
@@ -242,7 +227,7 @@ async function setupToolchainCommand(): Promise<string> {
     async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
       await fs.promises.mkdir(extensionContext.globalStorageUri.fsPath, { recursive: true });
 
-      const python = await resolvePythonCommand();
+      const python = await resolveOrInstallPythonCommand(progress);
       const toolPython = getToolPythonPath();
       const venvDir = getVenvDir();
 
@@ -790,6 +775,154 @@ async function resolvePythonCommand(): Promise<PythonCommand> {
     : '';
 
   throw new Error(`Python 3 was not found. Set zebra.pythonPath in VS Code settings or install Python 3.${macHint}`);
+}
+
+
+async function resolveOrInstallPythonCommand(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<PythonCommand> {
+  try {
+    return await resolvePythonCommand();
+  } catch (err: unknown) {
+    const configured = getConfiguredPythonCommand();
+    if (configured) {
+      throw err;
+    }
+
+    progress?.report({ message: 'Python 3 was not found. Attempting install...' });
+    output.appendLine('Python 3 was not found. Attempting automatic install.');
+
+    const installed = await installPython3IfPossible(progress);
+    if (!installed) {
+      throw new Error(getPythonInstallInstructions());
+    }
+
+    progress?.report({ message: 'Python install finished. Re-checking Python...' });
+    return await resolvePythonCommand();
+  }
+}
+
+async function installPython3IfPossible(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  if (process.platform === 'darwin') {
+    return installPython3OnMac(progress);
+  }
+
+  if (process.platform === 'win32') {
+    return installPython3OnWindows(progress);
+  }
+
+  return installPython3OnLinux(progress);
+}
+
+async function installPython3OnMac(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  const brew = await resolveBrewCommand();
+
+  if (brew) {
+    progress?.report({ message: 'Installing Python 3 with Homebrew...' });
+    output.appendLine(`Using Homebrew to install Python: ${brew}`);
+    await runCommand(brew, ['install', 'python']);
+    return true;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    'Python 3 was not found and Homebrew is not installed. Zebra can open the Homebrew installer instructions, then you can run Setup Toolchain again.',
+    'Open Homebrew Instructions',
+    'Open Python Downloads',
+    'Cancel',
+  );
+
+  if (choice === 'Open Homebrew Instructions') {
+    await vscode.env.openExternal(vscode.Uri.parse('https://brew.sh/'));
+  } else if (choice === 'Open Python Downloads') {
+    await vscode.env.openExternal(vscode.Uri.parse('https://www.python.org/downloads/macos/'));
+  }
+
+  return false;
+}
+
+async function installPython3OnWindows(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  if (await canRunCommand('winget', ['--version'])) {
+    progress?.report({ message: 'Installing Python 3 with winget...' });
+    output.appendLine('Using winget to install Python 3.');
+    await runCommand('winget', [
+      'install',
+      '-e',
+      '--id',
+      'Python.Python.3.12',
+      '--accept-package-agreements',
+      '--accept-source-agreements',
+    ]);
+    return true;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    'Python 3 was not found and winget is unavailable. Zebra can open the Python download page.',
+    'Open Python Downloads',
+    'Cancel',
+  );
+
+  if (choice === 'Open Python Downloads') {
+    await vscode.env.openExternal(vscode.Uri.parse('https://www.python.org/downloads/windows/'));
+  }
+
+  return false;
+}
+
+async function installPython3OnLinux(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  const apt = await firstRunnableCommand(['apt-get', '/usr/bin/apt-get'], ['--version']);
+  if (apt) {
+    const terminal = vscode.window.createTerminal('Zebra Python Install');
+    terminal.show();
+    terminal.sendText('sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip', true);
+    progress?.report({ message: 'Opened a terminal for apt install. Re-run Setup Toolchain when it finishes.' });
+    output.appendLine('Opened terminal for Linux Python install. Re-run Setup Toolchain after apt finishes.');
+    return false;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    'Python 3 was not found. Install python3, python3-venv, and python3-pip with your distro package manager, then run Setup Toolchain again.',
+    'Open Python Downloads',
+    'Cancel',
+  );
+
+  if (choice === 'Open Python Downloads') {
+    await vscode.env.openExternal(vscode.Uri.parse('https://www.python.org/downloads/'));
+  }
+
+  return false;
+}
+
+async function resolveBrewCommand(): Promise<string | undefined> {
+  return firstRunnableCommand(['/opt/homebrew/bin/brew', '/usr/local/bin/brew', 'brew'], ['--version']);
+}
+
+async function firstRunnableCommand(commands: string[], args: string[]): Promise<string | undefined> {
+  for (const command of commands) {
+    if (await canRunCommand(command, args)) {
+      return command;
+    }
+  }
+  return undefined;
+}
+
+function getPythonInstallInstructions(): string {
+  if (process.platform === 'darwin') {
+    return 'Python 3 could not be installed automatically. Install Homebrew from https://brew.sh/ and run: brew install python. Then restart VS Code and run Zebra: Setup Toolchain again.';
+  }
+
+  if (process.platform === 'win32') {
+    return 'Python 3 could not be installed automatically. Install Python from python.org or the Microsoft Store, then restart VS Code and run Zebra: Setup Toolchain again.';
+  }
+
+  return 'Python 3 could not be installed automatically. Install python3, python3-venv, and python3-pip with your distro package manager, then run Zebra: Setup Toolchain again.';
 }
 
 function getPythonCandidates(): PythonCommand[] {

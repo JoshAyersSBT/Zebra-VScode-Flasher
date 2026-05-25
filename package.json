@@ -12,11 +12,16 @@
   ],
   "activationEvents": [
     "onView:zebraExplorer",
+    "onCommand:zebra.refreshExplorer",
+    "onCommand:zebra.projectSetup",
     "onCommand:zebra.initProject",
+    "onCommand:zebra.initializeProject",
     "onCommand:zebra.projectStatus",
     "onCommand:zebra.checkProject",
     "onCommand:zebra.setupToolchain",
+    "onCommand:zebra.installPython",
     "onCommand:zebra.refreshDriverCache",
+    "onCommand:zebra.refreshRobotDriverCache",
     "onCommand:zebra.installRobotDrivers",
     "onCommand:zebra.detectSerialPort",
     "onCommand:zebra.deployProject",
@@ -45,19 +50,91 @@
       ]
     },
     "commands": [
-      { "command": "zebra.refreshExplorer", "title": "Zebra: Refresh", "icon": "$(refresh)" },
-      { "command": "zebra.initProject", "title": "Zebra: Initialize Project", "icon": "$(new-folder)" },
-      { "command": "zebra.projectStatus", "title": "Zebra: Project Status", "icon": "$(info)" },
-      { "command": "zebra.checkProject", "title": "Zebra: Check Python Syntax", "icon": "$(check)" },
-      { "command": "zebra.setupToolchain", "title": "Zebra: Setup Toolchain", "icon": "$(tools)" },
-      { "command": "zebra.refreshDriverCache", "title": "Zebra: Refresh Robot Driver Cache", "icon": "$(sync)" },
-      { "command": "zebra.installRobotDrivers", "title": "Zebra: Install Robot Drivers into Project", "icon": "$(file-submodule)" },
-      { "command": "zebra.detectSerialPort", "title": "Zebra: Detect ESP32 Serial Port", "icon": "$(plug)" },
-      { "command": "zebra.deployProject", "title": "Zebra: Deploy Project to ESP32", "icon": "$(cloud-upload)" },
-      { "command": "zebra.flashFirmware", "title": "Zebra: Flash MicroPython Firmware", "icon": "$(zap)" },
-      { "command": "zebra.resetDevice", "title": "Zebra: Reset Device", "icon": "$(debug-restart)" },
-      { "command": "zebra.openSerialMonitor", "title": "Zebra: Open Serial Monitor", "icon": "$(terminal)" },
-      { "command": "zebra.openDriverHelp", "title": "Zebra: Open USB UART Driver Help", "icon": "$(link-external)" }
+      {
+        "command": "zebra.refreshExplorer",
+        "title": "Zebra: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "zebra.projectSetup",
+        "title": "Zebra: Project Setup",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "zebra.initProject",
+        "title": "Zebra: Initialize Project",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "zebra.initializeProject",
+        "title": "Zebra: Initialize Project",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "zebra.projectStatus",
+        "title": "Zebra: Project Status",
+        "icon": "$(info)"
+      },
+      {
+        "command": "zebra.checkProject",
+        "title": "Zebra: Check Python Syntax",
+        "icon": "$(check)"
+      },
+      {
+        "command": "zebra.setupToolchain",
+        "title": "Zebra: Setup Toolchain",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "zebra.installPython",
+        "title": "Zebra: Install Python",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "zebra.refreshDriverCache",
+        "title": "Zebra: Refresh Robot Driver Cache",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "zebra.refreshRobotDriverCache",
+        "title": "Zebra: Refresh Robot Driver Cache",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "zebra.installRobotDrivers",
+        "title": "Zebra: Install Robot Drivers into Project",
+        "icon": "$(file-submodule)"
+      },
+      {
+        "command": "zebra.detectSerialPort",
+        "title": "Zebra: Detect ESP32 Serial Port",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "zebra.deployProject",
+        "title": "Zebra: Deploy Project to ESP32",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "zebra.flashFirmware",
+        "title": "Zebra: Flash MicroPython Firmware",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "zebra.resetDevice",
+        "title": "Zebra: Reset Device",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "zebra.openSerialMonitor",
+        "title": "Zebra: Open Serial Monitor",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "zebra.openDriverHelp",
+        "title": "Zebra: Open USB UART Driver Help",
+        "icon": "$(link-external)"
+      }
     ],
     "menus": {
       "view/title": [
@@ -65,6 +142,11 @@
           "command": "zebra.refreshExplorer",
           "when": "view == zebraExplorer",
           "group": "navigation"
+        },
+        {
+          "command": "zebra.projectSetup",
+          "when": "view == zebraExplorer",
+          "group": "navigation@2"
         }
       ],
       "editor/title": [
@@ -89,6 +171,10 @@
           "command": "zebra.checkProject",
           "when": "zebra.projectActive",
           "group": "zebra@2"
+        },
+        {
+          "command": "zebra.projectSetup",
+          "group": "zebra@3"
         }
       ]
     },
@@ -141,12 +227,14 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "test": "npm run compile && node test/run-unit-tests.js",
+    "test:vscode": "npm run compile && node test/run-vscode-smoke.js",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
     "@types/vscode": "^1.92.0",
+    "@vscode/test-electron": "^2.5.2",
     "typescript": "^5.5.4"
-  },
-  "dependencies": {}
+  }
 }
