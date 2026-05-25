@@ -391,11 +391,11 @@ async function deployProjectCommand(): Promise<void> {
         output.appendLine(`[${i + 1}/${files.length}] ${rel}`);
 
         await ensureRemoteDirs(toolPython, port, rel, madeDirs);
-        await runCommand(toolPython, ['-m', 'mpremote', 'connect', port, 'fs', 'cp', localPath, `:/${rel}`]);
+        await runMpremoteCommand(toolPython, port, ['fs', 'cp', localPath, `:/${rel}`]);
       }
 
       progress.report({ message: 'Resetting device...' });
-      await runCommand(toolPython, ['-m', 'mpremote', 'connect', port, 'reset'], true);
+      await runMpremoteCommand(toolPython, port, ['reset'], true);
     },
   );
 
@@ -687,8 +687,26 @@ async function ensureRemoteDirs(toolPython: string, port: string, rel: string, m
     built.push(part);
     const remote = `:/${built.join('/')}`;
     if (madeDirs.has(remote)) continue;
-    await runCommand(toolPython, ['-m', 'mpremote', 'connect', port, 'fs', 'mkdir', remote], true);
+    await runMpremoteCommand(toolPython, port, ['fs', 'mkdir', remote], true);
     madeDirs.add(remote);
+  }
+}
+
+async function runMpremoteCommand(toolPython: string, port: string, args: string[], ignoreFailure = false): Promise<string> {
+  const commandArgs = ['-m', 'mpremote', 'connect', port, ...args];
+
+  try {
+    return await runCommand(toolPython, commandArgs, ignoreFailure);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes('could not enter raw repl')) {
+      throw err;
+    }
+
+    output.appendLine('mpremote could not enter raw REPL; resetting device and retrying once...');
+    await runCommand(toolPython, ['-m', 'mpremote', 'connect', port, 'reset'], true);
+    await sleep(1500);
+    return runCommand(toolPython, commandArgs, ignoreFailure);
   }
 }
 
@@ -1023,6 +1041,10 @@ function normalizePath(value: string): string {
 function quoteShell(value: string): string {
   if (process.platform === 'win32') return `"${value.replace(/"/g, '\\"')}"`;
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function runCommand(command: string, args: string[], ignoreFailure = false): Promise<string> {

@@ -1,7 +1,7 @@
 {
   "name": "Zebra_Robot_Extention",
   "board": "esp32",
-  "port": "AUTO",
+  "port": "COM7",
   "runtimePath": "",
   "uploadProtocol": "mpremote"
 }
