@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"
@@ -183,8 +183,8 @@
       "properties": {
         "zebra.pythonPath": {
           "type": "string",
-          "default": "python",
-          "description": "Python executable used to create the extension-managed Zebra toolchain virtual environment. Use python3 on Linux/macOS if needed."
+          "default": "",
+          "description": "Optional Python executable used to create the extension-managed Zebra toolchain virtual environment. Leave empty to auto-detect or install Python 3."
         },
         "zebra.port": {
           "type": "string",

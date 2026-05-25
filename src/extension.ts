@@ -769,7 +769,14 @@ interface PythonCommand {
 }
 
 function getConfiguredPythonCommand(): string {
-  return getWorkspaceConfig<string>('pythonPath', '').trim();
+  const inspected = vscode.workspace.getConfiguration('zebra').inspect<string>('pythonPath');
+  const configured =
+    inspected?.workspaceFolderValue ??
+    inspected?.workspaceValue ??
+    inspected?.globalValue ??
+    '';
+
+  return configured.trim();
 }
 
 async function resolvePythonCommand(): Promise<PythonCommand> {
@@ -807,8 +814,8 @@ async function resolveOrInstallPythonCommand(
       throw err;
     }
 
-    progress?.report({ message: 'Python 3 was not found. Attempting install...' });
-    output.appendLine('Python 3 was not found. Attempting automatic install.');
+    progress?.report({ message: 'Python 3 was not found. Preparing installer...' });
+    output.appendLine('Python 3 was not found. Attempting platform installer.');
 
     const installed = await installPython3IfPossible(progress);
     if (!installed) {
@@ -866,8 +873,8 @@ async function installPython3OnWindows(
   progress?: vscode.Progress<{ message?: string; increment?: number }>,
 ): Promise<boolean> {
   if (await canRunCommand('winget', ['--version'])) {
-    progress?.report({ message: 'Installing Python 3 with winget...' });
-    output.appendLine('Using winget to install Python 3.');
+    progress?.report({ message: 'Installing Python 3.12 with winget...' });
+    output.appendLine('Using winget to install Python 3.12.');
     await runCommand('winget', [
       'install',
       '-e',
@@ -875,6 +882,23 @@ async function installPython3OnWindows(
       'Python.Python.3.12',
       '--accept-package-agreements',
       '--accept-source-agreements',
+    ]);
+    return true;
+  }
+
+  if (await canRunCommand('powershell.exe', [
+    '-NoProfile',
+    '-Command',
+    'if (Get-Command winget -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }',
+  ])) {
+    progress?.report({ message: 'Installing Python 3.12 with winget...' });
+    output.appendLine('Using winget through PowerShell to install Python 3.12.');
+    await runCommand('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      'winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements',
     ]);
     return true;
   }
@@ -902,6 +926,26 @@ async function installPython3OnLinux(
     terminal.sendText('sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip', true);
     progress?.report({ message: 'Opened a terminal for apt install. Re-run Setup Toolchain when it finishes.' });
     output.appendLine('Opened terminal for Linux Python install. Re-run Setup Toolchain after apt finishes.');
+    return false;
+  }
+
+  const dnf = await firstRunnableCommand(['dnf', '/usr/bin/dnf'], ['--version']);
+  if (dnf) {
+    const terminal = vscode.window.createTerminal('Zebra Python Install');
+    terminal.show();
+    terminal.sendText('sudo dnf install -y python3 python3-pip', true);
+    progress?.report({ message: 'Opened a terminal for dnf install. Re-run Setup Toolchain when it finishes.' });
+    output.appendLine('Opened terminal for Linux Python install with dnf. Re-run Setup Toolchain after dnf finishes.');
+    return false;
+  }
+
+  const pacman = await firstRunnableCommand(['pacman', '/usr/bin/pacman'], ['--version']);
+  if (pacman) {
+    const terminal = vscode.window.createTerminal('Zebra Python Install');
+    terminal.show();
+    terminal.sendText('sudo pacman -Sy --needed python python-pip', true);
+    progress?.report({ message: 'Opened a terminal for pacman install. Re-run Setup Toolchain when it finishes.' });
+    output.appendLine('Opened terminal for Linux Python install with pacman. Re-run Setup Toolchain after pacman finishes.');
     return false;
   }
 
@@ -937,7 +981,7 @@ function getPythonInstallInstructions(): string {
   }
 
   if (process.platform === 'win32') {
-    return 'Python 3 could not be installed automatically. Install Python from python.org or the Microsoft Store, then restart VS Code and run Zebra: Setup Toolchain again.';
+    return 'Python 3 could not be installed automatically. Install Python from python.org or with winget, then restart VS Code and run Zebra: Setup Toolchain again.';
   }
 
   return 'Python 3 could not be installed automatically. Install python3, python3-venv, and python3-pip with your distro package manager, then run Zebra: Setup Toolchain again.';

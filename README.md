@@ -36,6 +36,14 @@ The extension creates an isolated Python virtual environment in VS Code global e
 - `mpremote`
 - `esptool`
 
+If Python 3 is not already available, `Zebra: Setup Toolchain` and `Zebra: Initialize Project` attempt a platform-specific install first:
+
+- Windows: installs Python 3.12 with `winget` when available.
+- macOS: installs Python with Homebrew when available.
+- Linux: opens a terminal with the appropriate package-manager command for `apt`, `dnf`, or `pacman`.
+
+Set `zebra.pythonPath` only when you want to force a specific Python executable. Leave it empty for auto-detect and auto-install behavior.
+
 ## USB UART drivers
 
 If the ESP32 does not appear as a serial device, install the correct USB UART driver:
