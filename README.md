@@ -28,6 +28,16 @@ Open the Zebra activity bar panel or use the command palette:
 5. Run `Zebra: Deploy Project to ESP32`.
 6. Open the serial monitor.
 
+## Flashing firmware
+
+`Zebra: Flash MicroPython Firmware` can auto-collect the default ESP32 MicroPython firmware:
+
+```txt
+https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin
+```
+
+The command caches the downloaded `.bin` in the extension's global storage and reuses it on future flashes. You can also choose `Select ESP32 firmware .bin` to flash a local ESP32 MicroPython binary instead.
+
 ## Toolchain
 
 The extension creates an isolated Python virtual environment in VS Code global extension storage and installs:

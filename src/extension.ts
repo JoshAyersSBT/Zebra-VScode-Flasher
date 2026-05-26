@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as cp from 'child_process';
+import * as https from 'https';
 
 import {
   SerialCandidate,
@@ -19,6 +20,7 @@ import {
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git';
+const DEFAULT_MICROPYTHON_FIRMWARE_URL = 'https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin';
 const SKIP_DIRS = new Set(['__pycache__', '.git', '.vscode', '.idea', '.mypy_cache', '.pytest_cache', 'node_modules', '.venv', 'venv', 'dist', 'build']);
 const DEPLOY_SUFFIXES = new Set(['.py', '.mpy']);
 
@@ -411,20 +413,15 @@ async function flashFirmwareCommand(): Promise<void> {
     await updateZebraJson({ port });
   }
 
-  const picked = await vscode.window.showOpenDialog({
-    title: 'Select MicroPython firmware .bin',
-    canSelectFiles: true,
-    canSelectFolders: false,
-    canSelectMany: false,
-    filters: { Firmware: ['bin'], All: ['*'] },
-  });
-
-  const firmware = picked?.[0]?.fsPath;
+  const firmware = await pickFirmwareForFlash();
   if (!firmware) {
     return;
   }
 
   const baud = String(getWorkspaceConfig<number>('flashBaud', 460800));
+
+  output.appendLine(`Using serial port: ${port}`);
+  output.appendLine(`Firmware: ${firmware}`);
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Zebra: Flashing MicroPython firmware', cancellable: false },
@@ -438,6 +435,132 @@ async function flashFirmwareCommand(): Promise<void> {
   );
 
   void vscode.window.showInformationMessage('Firmware flash complete.');
+}
+
+async function pickFirmwareForFlash(): Promise<string | undefined> {
+  const firmwareUrl = getWorkspaceConfig<string>('firmwareUrl', DEFAULT_MICROPYTHON_FIRMWARE_URL) || DEFAULT_MICROPYTHON_FIRMWARE_URL;
+  const firmwareName = path.basename(new URL(firmwareUrl).pathname);
+
+  const choice = await vscode.window.showQuickPick(
+    [
+      {
+        label: 'Use auto-collected ESP32 MicroPython firmware',
+        description: firmwareName,
+        detail: firmwareUrl,
+        id: 'auto',
+      },
+      {
+        label: 'Select ESP32 firmware .bin',
+        description: 'Choose a local binary',
+        detail: 'Use this for a custom ESP32 MicroPython firmware image.',
+        id: 'custom',
+      },
+    ],
+    {
+      title: 'Select ESP32 MicroPython firmware',
+      placeHolder: 'Use the auto-collected firmware or select a local .bin',
+    },
+  );
+
+  if (!choice) {
+    return undefined;
+  }
+
+  if (choice.id === 'custom') {
+    return pickLocalFirmwareBin();
+  }
+
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Collecting ESP32 firmware', cancellable: false },
+    async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
+      progress.report({ message: firmwareName });
+      return ensureDefaultFirmwareDownloaded(firmwareUrl);
+    },
+  );
+}
+
+async function pickLocalFirmwareBin(): Promise<string | undefined> {
+  const picked = await vscode.window.showOpenDialog({
+    title: 'Select MicroPython firmware .bin',
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: false,
+    filters: { Firmware: ['bin'], All: ['*'] },
+  });
+
+  const firmware = picked?.[0]?.fsPath;
+  if (!firmware) {
+    return undefined;
+  }
+
+  return firmware;
+}
+
+async function ensureDefaultFirmwareDownloaded(firmwareUrl: string): Promise<string> {
+  await fs.promises.mkdir(getFirmwareCacheDir(), { recursive: true });
+
+  const firmwareName = path.basename(new URL(firmwareUrl).pathname);
+  const destination = path.join(getFirmwareCacheDir(), firmwareName);
+
+  if (await isUsableFile(destination)) {
+    output.appendLine(`Using cached firmware: ${destination}`);
+    return destination;
+  }
+
+  output.appendLine(`Downloading firmware: ${firmwareUrl}`);
+  await downloadFile(firmwareUrl, destination);
+  output.appendLine(`Firmware cached: ${destination}`);
+  return destination;
+}
+
+async function isUsableFile(file: string): Promise<boolean> {
+  try {
+    const stat = await fs.promises.stat(file);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function downloadFile(url: string, destination: string, redirects = 0): Promise<void> {
+  if (redirects > 5) {
+    throw new Error(`Too many redirects while downloading firmware: ${url}`);
+  }
+
+  const temp = `${destination}.download`;
+  let wroteFile = false;
+
+  await new Promise<void>((resolve, reject) => {
+    const request = https.get(url, (response) => {
+      const status = response.statusCode || 0;
+      const location = response.headers.location;
+
+      if (status >= 300 && status < 400 && location) {
+        response.resume();
+        const redirected = new URL(location, url).toString();
+        downloadFile(redirected, destination, redirects + 1).then(resolve, reject);
+        return;
+      }
+
+      if (status < 200 || status >= 300) {
+        response.resume();
+        reject(new Error(`Firmware download failed with HTTP ${status}: ${url}`));
+        return;
+      }
+
+      const file = fs.createWriteStream(temp);
+      wroteFile = true;
+      response.pipe(file);
+      file.on('finish', () => file.close((err) => err ? reject(err) : resolve()));
+      file.on('error', reject);
+    });
+
+    request.on('error', reject);
+  });
+
+  if (wroteFile) {
+    await fs.promises.rename(temp, destination);
+  }
 }
 
 async function resetDeviceCommand(): Promise<void> {
@@ -1130,6 +1253,10 @@ function getToolPythonPath(): string {
 
 function getDriverCacheDir(): string {
   return path.join(extensionContext.globalStorageUri.fsPath, 'driver-cache');
+}
+
+function getFirmwareCacheDir(): string {
+  return path.join(extensionContext.globalStorageUri.fsPath, 'firmware');
 }
 
 function getBundledRuntimeDir(): string {
