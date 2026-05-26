@@ -1,0 +1,15 @@
+.git/**
+.vscode/**
+.vscode-test-extensions/**
+.vscode-test-user-data/**
+.vscode-test-workspace/**
+node_modules/**
+test/**
+src/**
+robot/**
+*.vsix
+package-lock.json
+tsconfig.json
+main.py
+zebra.json
+out/**/*.map
