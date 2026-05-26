@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"

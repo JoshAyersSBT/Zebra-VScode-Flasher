@@ -788,11 +788,9 @@ async function resolvePythonCommand(): Promise<PythonCommand> {
     throw new Error(`Configured Python path was not found or could not run: ${configured}`);
   }
 
-  const candidates = getPythonCandidates();
-  for (const candidate of candidates) {
-    if (await canRunCommand(candidate.command, [...candidate.argsPrefix, '--version'])) {
-      return candidate;
-    }
+  const found = await findPythonCommand();
+  if (found) {
+    return found;
   }
 
   const macHint = process.platform === 'darwin'
@@ -800,6 +798,16 @@ async function resolvePythonCommand(): Promise<PythonCommand> {
     : '';
 
   throw new Error(`Python 3 was not found. Set zebra.pythonPath in VS Code settings or install Python 3.${macHint}`);
+}
+
+async function findPythonCommand(): Promise<PythonCommand | undefined> {
+  for (const candidate of getPythonCandidates()) {
+    if (await canRunCommand(candidate.command, [...candidate.argsPrefix, '--version'])) {
+      return candidate;
+    }
+  }
+
+  return undefined;
 }
 
 
@@ -882,8 +890,8 @@ async function installPython3OnWindows(
       'Python.Python.3.12',
       '--accept-package-agreements',
       '--accept-source-agreements',
-    ]);
-    return true;
+    ], true);
+    return canResolvePythonAfterInstaller();
   }
 
   if (await canRunCommand('powershell.exe', [
@@ -899,8 +907,8 @@ async function installPython3OnWindows(
       'Bypass',
       '-Command',
       'winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements',
-    ]);
-    return true;
+    ], true);
+    return canResolvePythonAfterInstaller();
   }
 
   const choice = await vscode.window.showWarningMessage(
@@ -913,6 +921,22 @@ async function installPython3OnWindows(
     await vscode.env.openExternal(vscode.Uri.parse('https://www.python.org/downloads/windows/'));
   }
 
+  return false;
+}
+
+async function canResolvePythonAfterInstaller(): Promise<boolean> {
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    const found = await findPythonCommand();
+    if (found) {
+      output.appendLine(`Python detected after installer: ${found.display}`);
+      return true;
+    }
+
+    output.appendLine(`Python not visible yet after installer; retry ${attempt}/6...`);
+    await sleep(1000);
+  }
+
+  output.appendLine('Python installer finished, but Python was not found in known locations.');
   return false;
 }
 
@@ -989,11 +1013,13 @@ function getPythonInstallInstructions(): string {
 
 function getPythonCandidates(): PythonCommand[] {
   if (process.platform === 'win32') {
-    return [
+    return dedupePythonCandidates([
       { command: 'py', argsPrefix: ['-3'], display: 'py -3' },
+      { command: path.join(process.env.SystemRoot || 'C:\\Windows', 'py.exe'), argsPrefix: ['-3'], display: 'py -3' },
       { command: 'python', argsPrefix: [], display: 'python' },
       { command: 'python3', argsPrefix: [], display: 'python3' },
-    ];
+      ...getWindowsInstalledPythonCandidates(),
+    ]);
   }
 
   if (process.platform === 'darwin') {
@@ -1012,6 +1038,50 @@ function getPythonCandidates(): PythonCommand[] {
     { command: '/usr/local/bin/python3', argsPrefix: [], display: '/usr/local/bin/python3' },
     { command: 'python', argsPrefix: [], display: 'python' },
   ];
+}
+
+function getWindowsInstalledPythonCandidates(): PythonCommand[] {
+  const roots = [
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Python') : '',
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Python') : '',
+    process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Python') : '',
+  ].filter(Boolean);
+
+  const candidates: PythonCommand[] = [];
+
+  for (const root of roots) {
+    if (!fs.existsSync(root)) {
+      continue;
+    }
+
+    try {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.toLowerCase().startsWith('python')) {
+          continue;
+        }
+
+        const python = path.join(root, entry.name, 'python.exe');
+        candidates.push({ command: python, argsPrefix: [], display: python });
+      }
+    } catch {
+      // Ignore inaccessible install roots and keep probing the remaining candidates.
+    }
+  }
+
+  candidates.sort((a, b) => b.command.localeCompare(a.command));
+  return candidates;
+}
+
+function dedupePythonCandidates(candidates: PythonCommand[]): PythonCommand[] {
+  const seen = new Set<string>();
+  return candidates.filter(candidate => {
+    const key = `${candidate.command}\0${candidate.argsPrefix.join('\0')}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function canRunCommand(command: string, args: string[]): Promise<boolean> {
