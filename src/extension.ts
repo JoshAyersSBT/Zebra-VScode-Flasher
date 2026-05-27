@@ -21,6 +21,9 @@ import {
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git';
 const DEFAULT_MICROPYTHON_FIRMWARE_URL = 'https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin';
+const DEFAULT_NATIVE_BUILD_ROOT = '~/zbot-fw';
+const MICROPYTHON_TAG = 'v1.28.0';
+const ESP_IDF_TAG = 'v5.5.1';
 const SKIP_DIRS = new Set(['__pycache__', '.git', '.vscode', '.idea', '.mypy_cache', '.pytest_cache', 'node_modules', '.venv', 'venv', 'dist', 'build']);
 const DEPLOY_SUFFIXES = new Set(['.py', '.mpy']);
 
@@ -58,6 +61,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   registerCommand(context, 'zebra.checkProject', checkProjectCommand, true);
   registerCommand(context, 'zebra.setupToolchain', setupToolchainCommand, true);
+  registerCommand(context, 'zebra.setupNativeToolchain', setupNativeToolchainCommand, true);
   registerCommand(context, 'zebra.installPython', installPythonCommand, true);
 
   registerCommand(context, 'zebra.refreshDriverCache', refreshRobotDriverCacheCommand, true);
@@ -159,6 +163,7 @@ async function getProjectSetupState(): Promise<ProjectSetupState> {
     toolchain: {
       installed: toolchainReady,
       pythonPath: toolPython,
+      nativeSummary: getNativeToolchainSummary(),
     },
     serial: {
       checked: serialChecked,
@@ -176,6 +181,9 @@ async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> 
       break;
     case 'setupToolchain':
       await setupToolchainCommand();
+      break;
+    case 'setupNativeToolchain':
+      await setupNativeToolchainCommand();
       break;
     case 'installPython':
       await installPythonCommand();
@@ -257,6 +265,44 @@ async function setupToolchainCommand(): Promise<string> {
       return toolPython;
     },
   );
+}
+
+async function setupNativeToolchainCommand(): Promise<void> {
+  await setupToolchainCommand();
+
+  if (process.platform === 'win32') {
+    if (!await canRunCommand('wsl.exe', ['--status'])) {
+      const choice = await vscode.window.showWarningMessage(
+        'Native C firmware builds need WSL on Windows. Install WSL with Debian/Ubuntu, then run this command again.',
+        'Open WSL Install Docs',
+        'Cancel',
+      );
+      if (choice === 'Open WSL Install Docs') {
+        await vscode.env.openExternal(vscode.Uri.parse('https://learn.microsoft.com/windows/wsl/install'));
+      }
+      return;
+    }
+
+    const distro = await pickWslDistro();
+    if (!distro) {
+      return;
+    }
+
+    const script = nativeLinuxSetupScript(getNativeBuildRoot());
+    const terminal = vscode.window.createTerminal('Zebra Native C Setup');
+    terminal.show();
+    terminal.sendText(`wsl.exe -d ${quotePowerShellArg(distro)} -- bash -lc ${quotePowerShellArg(script)}`, true);
+    output.appendLine(`Opened WSL native C setup in distro: ${distro}`);
+    void vscode.window.showInformationMessage('Zebra native C setup started in a terminal. Re-run after it finishes if sudo prompts were needed.');
+    return;
+  }
+
+  const script = nativeLinuxSetupScript(getNativeBuildRoot());
+  const terminal = vscode.window.createTerminal('Zebra Native C Setup');
+  terminal.show();
+  terminal.sendText(`bash -lc ${quoteShell(script)}`, true);
+  output.appendLine('Opened native C setup terminal.');
+  void vscode.window.showInformationMessage('Zebra native C setup started in a terminal.');
 }
 
 async function initializeProjectCommand(): Promise<void> {
@@ -421,7 +467,7 @@ async function flashFirmwareCommand(): Promise<void> {
   const baud = String(getWorkspaceConfig<number>('flashBaud', 460800));
 
   output.appendLine(`Using serial port: ${port}`);
-  output.appendLine(`Firmware: ${firmware}`);
+  output.appendLine(`Firmware: ${firmware.label}`);
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Zebra: Flashing MicroPython firmware', cancellable: false },
@@ -430,14 +476,36 @@ async function flashFirmwareCommand(): Promise<void> {
       await runCommand(toolPython, ['-m', 'esptool', '--chip', 'esp32', '--port', port, 'erase_flash']);
 
       progress.report({ message: 'Writing firmware...' });
-      await runCommand(toolPython, ['-m', 'esptool', '--chip', 'esp32', '--port', port, '--baud', baud, 'write_flash', '-z', '0x1000', firmware]);
+      if (firmware.kind === 'zebra-native') {
+        await runCommand(toolPython, [
+          '-m', 'esptool',
+          '--chip', 'esp32',
+          '--port', port,
+          '--baud', baud,
+          '--before', 'default_reset',
+          '--after', 'hard_reset',
+          'write_flash',
+          '--flash_mode', 'dio',
+          '--flash_size', '4MB',
+          '--flash_freq', '40m',
+          '0x1000', firmware.bootloader,
+          '0x8000', firmware.partitionTable,
+          '0x10000', firmware.micropython,
+        ]);
+      } else {
+        await runCommand(toolPython, ['-m', 'esptool', '--chip', 'esp32', '--port', port, '--baud', baud, 'write_flash', '-z', '0x1000', firmware.path]);
+      }
     },
   );
 
   void vscode.window.showInformationMessage('Firmware flash complete.');
 }
 
-async function pickFirmwareForFlash(): Promise<string | undefined> {
+type FirmwareSelection =
+  | { kind: 'single-bin'; path: string; label: string }
+  | { kind: 'zebra-native'; bootloader: string; partitionTable: string; micropython: string; label: string };
+
+async function pickFirmwareForFlash(): Promise<FirmwareSelection | undefined> {
   const firmwareUrl = getWorkspaceConfig<string>('firmwareUrl', DEFAULT_MICROPYTHON_FIRMWARE_URL) || DEFAULT_MICROPYTHON_FIRMWARE_URL;
   const firmwareName = path.basename(new URL(firmwareUrl).pathname);
 
@@ -455,6 +523,12 @@ async function pickFirmwareForFlash(): Promise<string | undefined> {
         detail: 'Use this for a custom ESP32 MicroPython firmware image.',
         id: 'custom',
       },
+      {
+        label: 'Select Zebra native firmware folder',
+        description: 'bootloader.bin + partition-table.bin + micropython.bin',
+        detail: 'Use this for C driver/user_main builds from build_tools/zbot_firmware.',
+        id: 'native-folder',
+      },
     ],
     {
       title: 'Select ESP32 MicroPython firmware',
@@ -470,16 +544,21 @@ async function pickFirmwareForFlash(): Promise<string | undefined> {
     return pickLocalFirmwareBin();
   }
 
-  return vscode.window.withProgress(
+  if (choice.id === 'native-folder') {
+    return pickNativeFirmwareFolder();
+  }
+
+  const firmwarePath = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Zebra: Collecting ESP32 firmware', cancellable: false },
     async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
       progress.report({ message: firmwareName });
       return ensureDefaultFirmwareDownloaded(firmwareUrl);
     },
   );
+  return { kind: 'single-bin', path: firmwarePath, label: firmwarePath };
 }
 
-async function pickLocalFirmwareBin(): Promise<string | undefined> {
+async function pickLocalFirmwareBin(): Promise<FirmwareSelection | undefined> {
   const picked = await vscode.window.showOpenDialog({
     title: 'Select MicroPython firmware .bin',
     canSelectFiles: true,
@@ -493,7 +572,35 @@ async function pickLocalFirmwareBin(): Promise<string | undefined> {
     return undefined;
   }
 
-  return firmware;
+  return { kind: 'single-bin', path: firmware, label: firmware };
+}
+
+async function pickNativeFirmwareFolder(): Promise<FirmwareSelection | undefined> {
+  const picked = await vscode.window.showOpenDialog({
+    title: 'Select Zebra native firmware folder',
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+  });
+
+  const folder = picked?.[0]?.fsPath;
+  if (!folder) {
+    return undefined;
+  }
+
+  const bootloader = path.join(folder, 'bootloader.bin');
+  const partitionTable = path.join(folder, 'partition-table.bin');
+  const micropython = path.join(folder, 'micropython.bin');
+  const missing = [];
+  if (!await isUsableFile(bootloader)) missing.push('bootloader.bin');
+  if (!await isUsableFile(partitionTable)) missing.push('partition-table.bin');
+  if (!await isUsableFile(micropython)) missing.push('micropython.bin');
+
+  if (missing.length) {
+    throw new Error(`Native firmware folder is missing: ${missing.join(', ')}`);
+  }
+
+  return { kind: 'zebra-native', bootloader, partitionTable, micropython, label: folder };
 }
 
 async function ensureDefaultFirmwareDownloaded(firmwareUrl: string): Promise<string> {
@@ -1259,6 +1366,18 @@ function getFirmwareCacheDir(): string {
   return path.join(extensionContext.globalStorageUri.fsPath, 'firmware');
 }
 
+function getNativeBuildRoot(): string {
+  return getWorkspaceConfig<string>('nativeBuildRoot', DEFAULT_NATIVE_BUILD_ROOT) || DEFAULT_NATIVE_BUILD_ROOT;
+}
+
+function getNativeToolchainSummary(): string {
+  const root = getNativeBuildRoot();
+  if (process.platform === 'win32') {
+    return `Optional WSL build root ${root}`;
+  }
+  return `Optional build root ${root}`;
+}
+
 function getBundledRuntimeDir(): string {
   return path.join(extensionContext.extensionPath, 'resources', 'runtime');
 }
@@ -1282,6 +1401,60 @@ function normalizePath(value: string): string {
 function quoteShell(value: string): string {
   if (process.platform === 'win32') return `"${value.replace(/"/g, '\\"')}"`;
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function quotePowerShellArg(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+async function pickWslDistro(): Promise<string | undefined> {
+  const raw = await runCommand('wsl.exe', ['-l', '-q'], true);
+  const distros = raw
+    .split(/\r?\n/)
+    .map(line => line.replace(/\0/g, '').trim())
+    .filter(Boolean);
+
+  const preferred = distros.find(name => /debian/i.test(name)) || distros.find(name => /ubuntu/i.test(name));
+  if (preferred && distros.length === 1) {
+    return preferred;
+  }
+
+  const choice = await vscode.window.showQuickPick(distros.length ? distros : ['Debian', 'Ubuntu'], {
+    title: 'Select WSL distro for native C firmware setup',
+    placeHolder: preferred ? `Recommended: ${preferred}` : 'Choose the Linux distro where ESP-IDF should be installed',
+  });
+  return choice || preferred;
+}
+
+function nativeLinuxSetupScript(buildRootSetting: string): string {
+  const buildRoot = buildRootSetting.trim() || DEFAULT_NATIVE_BUILD_ROOT;
+  return [
+    'set -e',
+    `ZBOT_FW_ROOT="${buildRoot.replace(/"/g, '\\"')}"`,
+    'case "$ZBOT_FW_ROOT" in "~"|"~/"*) ZBOT_FW_ROOT="$HOME${ZBOT_FW_ROOT#~}" ;; esac',
+    'echo "Zebra native C firmware setup root: $ZBOT_FW_ROOT"',
+    'if command -v apt-get >/dev/null 2>&1; then',
+    '  sudo apt-get update',
+    '  sudo apt-get install -y git make cmake ninja-build ccache gcc g++ pkg-config libffi-dev libssl-dev dfu-util libusb-1.0-0 python3 python3-venv python3-pip',
+    'elif command -v dnf >/dev/null 2>&1; then',
+    '  sudo dnf install -y git make cmake ninja-build ccache gcc gcc-c++ pkgconf-pkg-config libffi-devel openssl-devel dfu-util libusb1 python3 python3-pip',
+    'elif command -v pacman >/dev/null 2>&1; then',
+    '  sudo pacman -Sy --needed git make cmake ninja ccache gcc pkgconf libffi openssl dfu-util libusb python python-pip',
+    'else',
+    '  echo "Install git, make, cmake, ninja, ccache, gcc/g++, pkg-config, libffi, openssl, dfu-util, libusb, python3, python3-venv, and python3-pip with your package manager."',
+    'fi',
+    'mkdir -p "$ZBOT_FW_ROOT"',
+    `if [ ! -d "$ZBOT_FW_ROOT/micropython/.git" ]; then git clone --depth 1 --branch ${MICROPYTHON_TAG} https://github.com/micropython/micropython.git "$ZBOT_FW_ROOT/micropython"; fi`,
+    `if [ ! -d "$ZBOT_FW_ROOT/esp-idf/.git" ]; then git clone --depth 1 --branch ${ESP_IDF_TAG} --recursive https://github.com/espressif/esp-idf.git "$ZBOT_FW_ROOT/esp-idf"; fi`,
+    'git -C "$ZBOT_FW_ROOT/esp-idf" submodule update --init --recursive',
+    'export IDF_TOOLS_PATH="$ZBOT_FW_ROOT/idf_tools"',
+    '"$ZBOT_FW_ROOT/esp-idf/install.sh" esp32',
+    '. "$ZBOT_FW_ROOT/esp-idf/export.sh"',
+    'make -C "$ZBOT_FW_ROOT/micropython/mpy-cross"',
+    'make -C "$ZBOT_FW_ROOT/micropython/ports/esp32" BOARD=ESP32_GENERIC submodules',
+    'echo "Native C firmware dependencies are ready."',
+    'echo "Build with: make -C $ZBOT_FW_ROOT/micropython/ports/esp32 BOARD=ESP32_GENERIC BUILD=build-ZBOT USER_C_MODULES=/mnt/c/path/to/zbotDriver/micropython/cmodules/micropython.cmake"',
+  ].join('\n');
 }
 
 function sleep(ms: number): Promise<void> {

@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"
@@ -19,6 +19,7 @@
     "onCommand:zebra.projectStatus",
     "onCommand:zebra.checkProject",
     "onCommand:zebra.setupToolchain",
+    "onCommand:zebra.setupNativeToolchain",
     "onCommand:zebra.installPython",
     "onCommand:zebra.refreshDriverCache",
     "onCommand:zebra.refreshRobotDriverCache",
@@ -84,6 +85,11 @@
         "command": "zebra.setupToolchain",
         "title": "Zebra: Setup Toolchain",
         "icon": "$(tools)"
+      },
+      {
+        "command": "zebra.setupNativeToolchain",
+        "title": "Zebra: Setup Native C Firmware Toolchain",
+        "icon": "$(terminal-linux)"
       },
       {
         "command": "zebra.installPython",
@@ -200,6 +206,11 @@
           "type": "string",
           "default": "https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin",
           "description": "ESP32 MicroPython firmware URL used by Zebra: Flash MicroPython Firmware when auto-collecting firmware."
+        },
+        "zebra.nativeBuildRoot": {
+          "type": "string",
+          "default": "~/zbot-fw",
+          "description": "Linux/WSL directory used for native Zebra MicroPython firmware build dependencies."
         },
         "zebra.runtimePath": {
           "type": "string",

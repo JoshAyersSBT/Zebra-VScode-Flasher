@@ -10,6 +10,7 @@ Open the Zebra activity bar panel or use the command palette:
 - `Zebra: Project Status`
 - `Zebra: Check Python Syntax`
 - `Zebra: Setup Toolchain`
+- `Zebra: Setup Native C Firmware Toolchain`
 - `Zebra: Detect ESP32 Serial Port`
 - `Zebra: Deploy Project to ESP32`
 - `Zebra: Flash MicroPython Firmware`
@@ -23,6 +24,7 @@ Open the Zebra activity bar panel or use the command palette:
 2. Run `Zebra: Initialize Project`.
    - This now also runs the Zebra toolchain setup.
    - It creates/checks the extension venv and installs `pyserial`, `mpremote`, and `esptool`.
+   - For native C driver/user_main builds, also run `Zebra: Setup Native C Firmware Toolchain`.
 3. Connect the ESP32.
 4. Run `Zebra: Detect ESP32 Serial Port`.
 5. Run `Zebra: Deploy Project to ESP32`.
@@ -37,6 +39,14 @@ https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin
 ```
 
 The command caches the downloaded `.bin` in the extension's global storage and reuses it on future flashes. You can also choose `Select ESP32 firmware .bin` to flash a local ESP32 MicroPython binary instead.
+
+For Zebra native C firmware builds, choose `Select Zebra native firmware folder` and select a folder containing:
+
+- `bootloader.bin`
+- `partition-table.bin`
+- `micropython.bin`
+
+The extension flashes those at `0x1000`, `0x8000`, and `0x10000` with the ESP32 flash settings used by the native Zebra build.
 
 ## Toolchain
 
@@ -53,6 +63,14 @@ If Python 3 is not already available, `Zebra: Setup Toolchain` and `Zebra: Initi
 - Linux: opens a terminal with the appropriate package-manager command for `apt`, `dnf`, or `pacman`.
 
 Set `zebra.pythonPath` only when you want to force a specific Python executable. Leave it empty for auto-detect and auto-install behavior.
+
+## Native C firmware dependencies
+
+`Zebra: Setup Native C Firmware Toolchain` prepares the dependencies used to build the Zebra C driver modules and native `user_main.c` firmware.
+
+On Windows, it uses WSL and opens a terminal to install Linux build packages, clone MicroPython `v1.28.0`, clone ESP-IDF `v5.5.1`, install ESP-IDF tools for `esp32`, build `mpy-cross`, and prepare ESP32 submodules.
+
+On Linux/macOS, it opens a local terminal and runs the same setup flow where possible. The build root defaults to `~/zbot-fw` and can be changed with `zebra.nativeBuildRoot`.
 
 ## USB UART drivers
 

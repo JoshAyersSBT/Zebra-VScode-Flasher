@@ -15,6 +15,7 @@ export interface ProjectSetupState {
   toolchain: {
     installed: boolean;
     pythonPath: string;
+    nativeSummary: string;
   };
   serial: {
     checked: boolean;
@@ -32,6 +33,7 @@ export interface ProjectSetupState {
 export type ProjectSetupAction =
   | 'refresh'
   | 'setupToolchain'
+  | 'setupNativeToolchain'
   | 'installPython'
   | 'initializeProject'
   | 'installRobotDrivers'
@@ -216,6 +218,7 @@ export class ProjectSetupPanel {
         <div class="rows" id="toolRows"></div>
         <div class="actions">
           <button data-action="setupToolchain">Setup Toolchain</button>
+          <button class="secondary" data-action="setupNativeToolchain">Setup Native C</button>
           <button class="secondary" data-action="installPython">Install Python</button>
           <button class="secondary" data-action="openDriverHelp">USB Driver Help</button>
         </div>
@@ -302,6 +305,7 @@ export class ProjectSetupPanel {
       rows('toolRows', [
         ['Python', state.toolchain.installed ? state.toolchain.pythonPath : 'Not installed'],
         ['Packages', state.toolchain.installed ? 'pyserial, mpremote, esptool' : 'Run setup'],
+        ['Native C', state.toolchain.nativeSummary || 'Optional'],
       ]);
 
       const serialKind = state.serial.ports.length ? 'ok' : (state.serial.checked ? 'bad' : 'warn');
