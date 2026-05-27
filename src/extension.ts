@@ -271,19 +271,7 @@ async function setupNativeToolchainCommand(): Promise<void> {
   await setupToolchainCommand();
 
   if (process.platform === 'win32') {
-    if (!await canRunCommand('wsl.exe', ['--status'])) {
-      const choice = await vscode.window.showWarningMessage(
-        'Native C firmware builds need WSL on Windows. Install WSL with Debian/Ubuntu, then run this command again.',
-        'Open WSL Install Docs',
-        'Cancel',
-      );
-      if (choice === 'Open WSL Install Docs') {
-        await vscode.env.openExternal(vscode.Uri.parse('https://learn.microsoft.com/windows/wsl/install'));
-      }
-      return;
-    }
-
-    const distro = await pickWslDistro();
+    const distro = await ensureWindowsWslDebian();
     if (!distro) {
       return;
     }
@@ -1407,13 +1395,72 @@ function quotePowerShellArg(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-async function pickWslDistro(): Promise<string | undefined> {
+async function ensureWindowsWslDebian(): Promise<string | undefined> {
+  if (!await canRunCommand('wsl.exe', ['--status'])) {
+    const choice = await vscode.window.showWarningMessage(
+      'Native C firmware builds need WSL Debian. Zebra can open a terminal to install WSL with Debian. A reboot may be required.',
+      'Install WSL Debian',
+      'Open WSL Docs',
+      'Cancel',
+    );
+
+    if (choice === 'Install WSL Debian') {
+      openWindowsWslInstallTerminal(false);
+    } else if (choice === 'Open WSL Docs') {
+      await vscode.env.openExternal(vscode.Uri.parse('https://learn.microsoft.com/windows/wsl/install'));
+    }
+    return undefined;
+  }
+
+  const distros = await listWslDistros();
+  const debian = distros.find(name => /^debian$/i.test(name)) || distros.find(name => /debian/i.test(name));
+  if (debian) {
+    return debian;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    'WSL is installed, but Debian is not. Zebra native firmware builds use Debian by default.',
+    'Install Debian',
+    'Use Other Distro',
+    'Cancel',
+  );
+
+  if (choice === 'Install Debian') {
+    openWindowsWslInstallTerminal(true);
+    return undefined;
+  }
+
+  if (choice === 'Use Other Distro') {
+    return pickWslDistroFromList(distros);
+  }
+
+  return undefined;
+}
+
+function openWindowsWslInstallTerminal(wslAlreadyInstalled: boolean): void {
+  const terminal = vscode.window.createTerminal('Zebra WSL Debian Install');
+  terminal.show();
+  const command = wslAlreadyInstalled ? 'wsl.exe --install -d Debian' : 'wsl.exe --install -d Debian';
+  terminal.sendText(command, true);
+  output.appendLine(`Opened terminal for WSL Debian install: ${command}`);
+  void vscode.window.showInformationMessage('WSL Debian install started. If Windows asks for a reboot or first-run Linux user setup, complete that, then run Zebra: Setup Native C Firmware Toolchain again.');
+}
+
+async function listWslDistros(): Promise<string[]> {
   const raw = await runCommand('wsl.exe', ['-l', '-q'], true);
-  const distros = raw
+  return raw
     .split(/\r?\n/)
     .map(line => line.replace(/\0/g, '').trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter(line => !/windows subsystem for linux/i.test(line));
+}
 
+async function pickWslDistro(): Promise<string | undefined> {
+  const distros = await listWslDistros();
+  return pickWslDistroFromList(distros);
+}
+
+async function pickWslDistroFromList(distros: string[]): Promise<string | undefined> {
   const preferred = distros.find(name => /debian/i.test(name)) || distros.find(name => /ubuntu/i.test(name));
   if (preferred && distros.length === 1) {
     return preferred;

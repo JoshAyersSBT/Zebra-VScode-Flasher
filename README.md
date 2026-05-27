@@ -68,7 +68,7 @@ Set `zebra.pythonPath` only when you want to force a specific Python executable.
 
 `Zebra: Setup Native C Firmware Toolchain` prepares the dependencies used to build the Zebra C driver modules and native `user_main.c` firmware.
 
-On Windows, it uses WSL and opens a terminal to install Linux build packages, clone MicroPython `v1.28.0`, clone ESP-IDF `v5.5.1`, install ESP-IDF tools for `esp32`, build `mpy-cross`, and prepare ESP32 submodules.
+On Windows, it bootstraps WSL Debian when needed by opening a terminal with `wsl.exe --install -d Debian`. If a reboot or first-run Linux user setup is required, finish that step and run the command again. Once Debian is available, it installs Linux build packages, clones MicroPython `v1.28.0`, clones ESP-IDF `v5.5.1`, installs ESP-IDF tools for `esp32`, builds `mpy-cross`, and prepares ESP32 submodules.
 
 On Linux/macOS, it opens a local terminal and runs the same setup flow where possible. The build root defaults to `~/zbot-fw` and can be changed with `zebra.nativeBuildRoot`.
 
