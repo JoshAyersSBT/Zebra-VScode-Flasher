@@ -53,6 +53,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.window.registerTreeDataProvider('zebraExplorer', explorerProvider));
 
   registerCommand(context, 'zebra.refreshExplorer', refreshExplorerCommand, false);
+  registerCommand(context, 'zebra.welcome', projectSetupCommand, false);
   registerCommand(context, 'zebra.projectSetup', projectSetupCommand, false);
   registerCommand(context, 'zebra.projectStatus', projectSetupCommand, false);
 
@@ -176,6 +177,9 @@ async function getProjectSetupState(): Promise<ProjectSetupState> {
 
 async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> {
   switch (action) {
+    case 'openFolder':
+      await vscode.commands.executeCommand('vscode.openFolder');
+      break;
     case 'refresh':
       await refreshExplorerCommand();
       break;
@@ -205,6 +209,9 @@ async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> 
       break;
     case 'deployProject':
       await deployProjectCommand();
+      break;
+    case 'flashFirmware':
+      await flashFirmwareCommand();
       break;
     case 'openSerialMonitor':
       await openSerialMonitorCommand();
@@ -1598,6 +1605,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
     if (!root) {
       return Promise.resolve([
         new ZebraTreeItem('Open a folder to start', 'No workspace', vscode.TreeItemCollapsibleState.None, 'info'),
+        commandItem('Welcome', 'zebra.welcome', 'home'),
         commandItem('Project Setup', 'zebra.projectSetup', 'gear'),
       ]);
     }
@@ -1606,6 +1614,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
     const items: ZebraTreeItem[] = [
       new ZebraTreeItem(status.valid ? 'Project Ready' : 'Project Needs Setup', path.basename(root), vscode.TreeItemCollapsibleState.None, status.valid ? 'pass' : 'warning'),
       commandItem('Project Setup', 'zebra.projectSetup', 'gear'),
+      commandItem('Welcome', 'zebra.welcome', 'home'),
       commandItem('Initialize Project', 'zebra.initializeProject', 'new-folder'),
       commandItem('Setup Toolchain', 'zebra.setupToolchain', 'tools'),
       commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),

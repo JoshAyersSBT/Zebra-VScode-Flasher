@@ -31,6 +31,7 @@ export interface ProjectSetupState {
 }
 
 export type ProjectSetupAction =
+  | 'openFolder'
   | 'refresh'
   | 'setupToolchain'
   | 'setupNativeToolchain'
@@ -42,6 +43,7 @@ export type ProjectSetupAction =
   | 'checkProject'
   | 'openDriverHelp'
   | 'deployProject'
+  | 'flashFirmware'
   | 'openSerialMonitor';
 
 export class ProjectSetupPanel {
@@ -166,6 +168,16 @@ export class ProjectSetupPanel {
     .wrap { max-width: 1040px; margin: 0 auto; }
     h1 { margin: 0 0 6px; font-size: 24px; }
     .sub { color: var(--muted); margin-bottom: 18px; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(260px, .75fr); gap: 18px; align-items: stretch; margin-bottom: 16px; }
+    .intro { border: 1px solid var(--border); border-radius: 8px; padding: 18px; background: color-mix(in srgb, var(--vscode-sideBar-background), transparent 25%); }
+    .intro h1 { font-size: 28px; margin-bottom: 8px; }
+    .intro p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .primary-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .workflow { border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: var(--card); }
+    .workflow h2 { margin: 0 0 10px; font-size: 16px; }
+    .steps { display: grid; gap: 8px; counter-reset: step; }
+    .step { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 9px; align-items: start; color: var(--muted); line-height: 1.35; }
+    .step::before { counter-increment: step; content: counter(step); width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; color: var(--button-fg); background: var(--button); font-size: 12px; font-weight: 700; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(275px, 1fr)); gap: 14px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
     .card h2 { margin: 0 0 10px; font-size: 16px; }
@@ -192,12 +204,33 @@ export class ProjectSetupPanel {
     .empty { color: var(--muted); font-size: 12px; }
     .command-card { margin-top: 14px; }
     code { color: var(--vscode-textPreformat-foreground); }
+    @media (max-width: 760px) {
+      .hero { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Zebra Project Setup</h1>
-    <div class="sub">Initialize, validate, and manage the MicroPython ZebraBot project from one place.</div>
+    <div class="hero">
+      <section class="intro">
+        <h1>Welcome to Zebra MicroPython</h1>
+        <p>Create a ZebraBot project, prepare the Python tools, flash MicroPython to an ESP32, then deploy your runtime files to the board.</p>
+        <div class="primary-actions">
+          <button data-action="initializeProject" data-requires="workspace">Create New Project</button>
+          <button class="secondary" data-action="openFolder" data-requires="no-workspace">Open Folder</button>
+          <button class="secondary" data-action="setupToolchain">Setup Tools</button>
+        </div>
+      </section>
+      <section class="workflow">
+        <h2>Board Flash Workflow</h2>
+        <div class="steps">
+          <div class="step">Create or open a Zebra project so <code>zebra.json</code>, <code>main.py</code>, and <code>robot/</code> are in place.</div>
+          <div class="step">Run toolchain setup, then install USB UART drivers if your board is not detected.</div>
+          <div class="step">Put the ESP32 into bootloader mode, choose Flash Firmware, and write MicroPython to the board.</div>
+          <div class="step">Detect the serial port, deploy the project files, then open the serial monitor to watch boot logs.</div>
+        </div>
+      </section>
+    </div>
     <div id="banner" class="banner">Loading project status...</div>
     <div class="grid">
       <section class="card">
@@ -239,6 +272,7 @@ export class ProjectSetupPanel {
     <section class="card command-card">
       <h2>Commands</h2>
       <div class="actions">
+        <button data-action="flashFirmware" data-requires="toolchain">Flash Firmware</button>
         <button data-action="deployProject" data-requires="project-toolchain">Deploy Project</button>
         <button class="secondary" data-action="openSerialMonitor" data-requires="toolchain">Serial Monitor</button>
         <button class="secondary" data-action="refreshRobotDriverCache">Refresh Driver Cache</button>
@@ -360,6 +394,7 @@ export class ProjectSetupPanel {
         const requirement = button.dataset.requires || '';
         let disabled = busy;
         if (requirement === 'workspace') disabled = disabled || !hasWorkspace;
+        if (requirement === 'no-workspace') disabled = disabled || hasWorkspace;
         if (requirement === 'toolchain') disabled = disabled || !toolchainReady;
         if (requirement === 'project-toolchain') disabled = disabled || !projectReady || !toolchainReady;
         button.disabled = disabled;
