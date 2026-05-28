@@ -14,6 +14,7 @@ export class DriverDocsPanel {
   private static currentPanel: DriverDocsPanel | undefined;
 
   private readonly panel: vscode.WebviewPanel;
+  private readonly extensionUri: vscode.Uri;
   private docsRoot: string;
   private disposables: vscode.Disposable[] = [];
 
@@ -38,19 +39,21 @@ export class DriverDocsPanel {
       },
     );
 
-    DriverDocsPanel.currentPanel = new DriverDocsPanel(panel, docsRoot);
+    DriverDocsPanel.currentPanel = new DriverDocsPanel(panel, extensionUri, docsRoot);
     DriverDocsPanel.currentPanel.render();
   }
 
-  private constructor(panel: vscode.WebviewPanel, docsRoot: string) {
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, docsRoot: string) {
     this.panel = panel;
+    this.extensionUri = extensionUri;
     this.docsRoot = docsRoot;
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
   }
 
   private render(): void {
     const pages = loadPages(this.docsRoot);
-    this.panel.webview.html = getHtml(this.panel.webview.cspSource, pages, this.docsRoot);
+    const mermaidUri = this.panel.webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'resources', 'vendor', 'mermaid.min.js'));
+    this.panel.webview.html = getHtml(this.panel.webview.cspSource, pages, this.docsRoot, mermaidUri);
   }
 
   private dispose(): void {
@@ -117,7 +120,12 @@ function markdownToPage(file: string, markdown: string): DocPage {
     }
 
     if (fence && inFence) {
-      html.push(`<pre><code class="language-${escapeAttr(fenceLang)}">${escapeHtml(fenceLines.join('\n'))}</code></pre>`);
+      const code = fenceLines.join('\n');
+      if (fenceLang.toLowerCase() === 'mermaid') {
+        html.push(`<div class="mermaid">${escapeHtml(code)}</div>`);
+      } else {
+        html.push(`<pre><code class="language-${escapeAttr(fenceLang)}">${escapeHtml(code)}</code></pre>`);
+      }
       inFence = false;
       fenceLang = '';
       fenceLines = [];
@@ -165,7 +173,7 @@ function markdownToPage(file: string, markdown: string): DocPage {
   return { id: pageId, title, file, html: html.join('\n'), headings };
 }
 
-function getHtml(cspSource: string, pages: DocPage[], docsRoot: string): string {
+function getHtml(cspSource: string, pages: DocPage[], docsRoot: string, mermaidUri: vscode.Uri): string {
   const nonce = getNonce();
   const pageButtons = pages.map((page, index) => `
     <button class="page-link${index === 0 ? ' active' : ''}" data-page="${escapeAttr(page.id)}">
@@ -184,14 +192,14 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string): string 
   const empty = pages.length ? '' : `
     <article class="doc-page active">
       <h1>Driver Docs Not Found</h1>
-      <p>No Markdown docs were found at <code>${escapeHtml(docsRoot)}</code>. Run <code>Zebra: Refresh Robot Driver Cache</code> and open this tab again.</p>
+      <p>No Markdown docs were found at <code>${escapeHtml(docsRoot)}</code>. Run <code>Zebra: Refresh Robot Driver Cache</code> to download the latest docs from the configured driver repo, then open this tab again.</p>
     </article>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'nonce-${nonce}';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Zebra Driver Docs</title>
   <style>
@@ -229,7 +237,17 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string): string 
     a:hover { text-decoration: underline; }
     code { font-family: var(--vscode-editor-font-family); background: var(--code); padding: 1px 4px; border-radius: 4px; }
     pre { margin: 14px 0 20px; padding: 14px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--code); }
-    pre code { padding: 0; background: transparent; border-radius: 0; }
+    pre code { display: block; padding: 0; background: transparent; border-radius: 0; white-space: pre; tab-size: 4; }
+    .tok-keyword { color: var(--vscode-symbolIcon-keywordForeground); }
+    .tok-string { color: var(--vscode-debugTokenExpression-string); }
+    .tok-number { color: var(--vscode-debugTokenExpression-number); }
+    .tok-comment { color: var(--vscode-descriptionForeground); font-style: italic; }
+    .tok-builtin { color: var(--vscode-symbolIcon-functionForeground); }
+    .tok-property { color: var(--vscode-symbolIcon-propertyForeground); }
+    .tok-punctuation { color: var(--vscode-symbolIcon-operatorForeground); }
+    .mermaid { margin: 16px 0 22px; padding: 16px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--side), transparent 38%); text-align: center; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    .mermaid-error { text-align: left; color: var(--vscode-errorForeground); }
     .toc-page { display: none; }
     .toc-page.active { display: grid; gap: 7px; }
     .toc-page a { color: var(--muted); font-size: 13px; }
@@ -258,10 +276,20 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string): string 
       ${headingLinks}
     </aside>
   </div>
+  <script nonce="${nonce}" src="${escapeAttr(mermaidUri.toString())}"></script>
   <script nonce="${nonce}">
     const buttons = [...document.querySelectorAll('.page-link')];
     const pages = [...document.querySelectorAll('.doc-page')];
     const tocPages = [...document.querySelectorAll('.toc-page')];
+    if (window.mermaid) {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: document.body.classList.contains('vscode-light') ? 'default' : 'dark'
+      });
+      renderMermaid();
+    }
+    highlightCodeBlocks();
     buttons.forEach(button => {
       button.addEventListener('click', () => {
         setPage(button.dataset.page);
@@ -282,6 +310,81 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string): string 
       buttons.forEach(b => b.classList.toggle('active', b.dataset.page === page));
       pages.forEach(p => p.classList.toggle('active', p.dataset.page === page));
       tocPages.forEach(t => t.classList.toggle('active', t.dataset.toc === page));
+      renderMermaid();
+    }
+    function renderMermaid() {
+      if (!window.mermaid) return;
+      const nodes = document.querySelectorAll('.doc-page.active .mermaid:not([data-processed])');
+      if (!nodes.length) return;
+      mermaid.run({ nodes }).catch(error => {
+        nodes.forEach(node => {
+          if (node.querySelector('svg')) return;
+          node.classList.add('mermaid-error');
+          node.textContent = 'Could not render Mermaid diagram: ' + (error?.message || String(error));
+        });
+      });
+    }
+    function highlightCodeBlocks() {
+      document.querySelectorAll('pre code').forEach(code => {
+        const language = [...code.classList].find(name => name.startsWith('language-'))?.slice(9) || '';
+        code.innerHTML = highlightCode(code.textContent || '', language.toLowerCase());
+      });
+    }
+    function highlightCode(source, language) {
+      if (language === 'json') return highlightJson(source);
+      if (language === 'python' || language === 'py') return highlightPython(source);
+      if (language === 'bash' || language === 'sh' || language === 'shell') return highlightShell(source);
+      return escapeCode(source);
+    }
+    function highlightPython(source) {
+      const keywords = new Set('False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield'.split(' '));
+      const builtins = new Set('abs all any bool dict enumerate float format int len list max min object print range round set str sum tuple type zip'.split(' '));
+      return tokenize(source, /(#.*)|("""[\\s\\S]*?"""|'''[\\s\\S]*?'''|"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*')|\\b(\\d+(?:\\.\\d+)?)\\b|\\b([A-Za-z_]\\w*)\\b|([{}()[\\].,:;=+\\-*\\/%<>!]+)/g, match => {
+        if (match[1]) return span('comment', match[1]);
+        if (match[2]) return span('string', match[2]);
+        if (match[3]) return span('number', match[3]);
+        if (match[4] && keywords.has(match[4])) return span('keyword', match[4]);
+        if (match[4] && builtins.has(match[4])) return span('builtin', match[4]);
+        if (match[5]) return span('punctuation', match[5]);
+        return escapeCode(match[0]);
+      });
+    }
+    function highlightJson(source) {
+      return tokenize(source, /("(?:\\\\.|[^"\\\\])*")\\s*(?=:)|("(?:\\\\.|[^"\\\\])*")|\\b(true|false|null)\\b|(-?\\d+(?:\\.\\d+)?(?:e[+-]?\\d+)?)|([{}[\\],:])/gi, match => {
+        if (match[1]) return span('property', match[1]);
+        if (match[2]) return span('string', match[2]);
+        if (match[3]) return span('keyword', match[3]);
+        if (match[4]) return span('number', match[4]);
+        if (match[5]) return span('punctuation', match[5]);
+        return escapeCode(match[0]);
+      });
+    }
+    function highlightShell(source) {
+      const keywords = new Set('case do done elif else esac export fi for function if in local then while'.split(' '));
+      return tokenize(source, /(#.*)|("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*')|(\\$[A-Za-z_]\\w*|\\$\\{[^}]+\\})|\\b([A-Za-z_]\\w*)\\b|([{}()[\\].,:;=+\\-*\\/%<>!|&]+)/g, match => {
+        if (match[1]) return span('comment', match[1]);
+        if (match[2]) return span('string', match[2]);
+        if (match[3]) return span('property', match[3]);
+        if (match[4] && keywords.has(match[4])) return span('keyword', match[4]);
+        if (match[5]) return span('punctuation', match[5]);
+        return escapeCode(match[0]);
+      });
+    }
+    function tokenize(source, pattern, render) {
+      let out = '';
+      let index = 0;
+      for (const match of source.matchAll(pattern)) {
+        out += escapeCode(source.slice(index, match.index));
+        out += render(match);
+        index = match.index + match[0].length;
+      }
+      return out + escapeCode(source.slice(index));
+    }
+    function span(kind, value) {
+      return '<span class="tok-' + kind + '">' + escapeCode(value) + '</span>';
+    }
+    function escapeCode(value) {
+      return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
   </script>
 </body>

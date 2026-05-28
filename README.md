@@ -158,6 +158,6 @@ https://github.com/JoshAyersSBT/ZbotDriver.git
 ```
 
 The extension reads driver documentation from the cached driver repo `docs/`
-folder, with bundled fallback copies under `resources/driver-docs`. Documentation
-files are shown in a read-only VS Code tab and are not included in staged flash
-or deploy files.
+folder. Run `Zebra: Refresh Robot Driver Cache` to pull updated docs from the
+configured driver repo. Documentation files are shown in a read-only VS Code tab
+and are not included in staged flash or deploy files.

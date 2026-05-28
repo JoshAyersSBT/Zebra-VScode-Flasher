@@ -484,22 +484,7 @@ async function openDriverDocsCommand(): Promise<void> {
 }
 
 async function getDriverDocsRoot(): Promise<string> {
-  const bundledDocs = path.join(extensionContext.extensionPath, 'resources', 'driver-docs');
-  if (fs.existsSync(bundledDocs)) {
-    return bundledDocs;
-  }
-
-  const cacheDocs = path.join(getDriverCacheDir(), 'docs');
-  try {
-    await refreshRobotDriverCache();
-    if (fs.existsSync(cacheDocs)) {
-      return cacheDocs;
-    }
-  } catch (err: unknown) {
-    output.appendLine(`Driver docs repo fetch failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  return bundledDocs;
+  return path.join(getDriverCacheDir(), 'docs');
 }
 
 async function installRobotDriversCommand(): Promise<void> {
