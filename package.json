@@ -24,6 +24,7 @@
     "onCommand:zebra.installPython",
     "onCommand:zebra.refreshDriverCache",
     "onCommand:zebra.refreshRobotDriverCache",
+    "onCommand:zebra.checkDriverCacheUpdates",
     "onCommand:zebra.installRobotDrivers",
     "onCommand:zebra.detectSerialPort",
     "onCommand:zebra.deployProject",
@@ -112,6 +113,11 @@
         "command": "zebra.refreshRobotDriverCache",
         "title": "Zebra: Refresh Robot Driver Cache",
         "icon": "$(sync)"
+      },
+      {
+        "command": "zebra.checkDriverCacheUpdates",
+        "title": "Zebra: Check Robot Driver Cache Updates",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "zebra.installRobotDrivers",
@@ -251,8 +257,8 @@
         },
         "zebra.driverRepoBranch": {
           "type": "string",
-          "default": "",
-          "description": "Optional branch or tag to use when cloning zebra.driverRepoUrl. Empty uses the repo default branch."
+          "default": "codex/C-Core-modules",
+          "description": "Branch or tag to use when cloning zebra.driverRepoUrl. Defaults to the C-core modules driver branch."
         },
         "zebra.serialMonitorBaud": {
           "type": "number",

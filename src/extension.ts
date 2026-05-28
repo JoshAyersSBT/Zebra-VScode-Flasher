@@ -21,6 +21,7 @@ import { DriverDocsPanel } from './driverDocsPanel';
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool', 'bleak'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/ZbotDriver.git';
+const DEFAULT_DRIVER_REPO_BRANCH = 'codex/C-Core-modules';
 const DEFAULT_MICROPYTHON_FIRMWARE_URL = 'https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin';
 const DEFAULT_NATIVE_BUILD_ROOT = '~/zbot-fw';
 const DEFAULT_WSL_FLASHER_USERNAME = 'flasher';
@@ -54,6 +55,18 @@ interface BleDeviceInfo {
   isZebraCandidate: boolean;
 }
 
+interface DriverCacheStatus {
+  state: 'missing' | 'current' | 'stale' | 'unknown';
+  summary: string;
+  cacheDir: string;
+  repo: string;
+  branch: string;
+  localRevision?: string;
+  remoteRevision?: string;
+  cacheRepo?: string;
+  cacheBranch?: string;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   output = vscode.window.createOutputChannel('Zebra Flasher');
@@ -78,6 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   registerCommand(context, 'zebra.refreshDriverCache', refreshRobotDriverCacheCommand, true);
   registerCommand(context, 'zebra.refreshRobotDriverCache', refreshRobotDriverCacheCommand, true);
+  registerCommand(context, 'zebra.checkDriverCacheUpdates', checkDriverCacheUpdatesCommand, true);
   registerCommand(context, 'zebra.installRobotDrivers', installRobotDriversCommand, true);
 
   registerCommand(context, 'zebra.detectSerialPort', detectSerialPortCommand, true);
@@ -222,6 +236,9 @@ async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> 
     case 'refreshRobotDriverCache':
       await refreshRobotDriverCacheCommand();
       break;
+    case 'checkDriverCacheUpdates':
+      await checkDriverCacheUpdatesCommand();
+      break;
     case 'detectSerialPort':
       await detectSerialPortCommand();
       break;
@@ -351,6 +368,7 @@ async function initializeProjectCommand(): Promise<void> {
           port: 'AUTO',
           baud: getWorkspaceConfig<number>('flashBaud', 460800),
           driverRepo: getWorkspaceConfig<string>('driverRepoUrl', DEFAULT_DRIVER_REPO),
+          driverRepoBranch: getWorkspaceConfig<string>('driverRepoBranch', DEFAULT_DRIVER_REPO_BRANCH),
         },
         null,
         2,
@@ -426,17 +444,52 @@ async function refreshRobotDriverCacheCommand(): Promise<void> {
   void vscode.window.showInformationMessage('Robot driver cache refreshed.');
 }
 
+async function checkDriverCacheUpdatesCommand(): Promise<void> {
+  const status = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Checking robot driver cache', cancellable: false },
+    async () => checkDriverCacheStatus(),
+  );
+
+  output.appendLine(`Driver cache status: ${status.summary}`);
+  output.appendLine(`Repository: ${status.repo}`);
+  output.appendLine(`Branch/tag: ${status.branch}`);
+  output.appendLine(`Cache: ${status.cacheDir}`);
+  if (status.cacheRepo) output.appendLine(`Cached repo: ${status.cacheRepo}`);
+  if (status.cacheBranch) output.appendLine(`Cached branch: ${status.cacheBranch}`);
+  if (status.localRevision) output.appendLine(`Local revision: ${status.localRevision}`);
+  if (status.remoteRevision) output.appendLine(`Remote revision: ${status.remoteRevision}`);
+
+  if (status.state === 'current') {
+    void vscode.window.showInformationMessage(status.summary);
+    return;
+  }
+
+  if (status.state === 'unknown') {
+    const choice = await vscode.window.showWarningMessage(status.summary, 'Refresh Cache', 'Cancel');
+    if (choice === 'Refresh Cache') {
+      await refreshRobotDriverCacheCommand();
+    }
+    return;
+  }
+
+  const choice = await vscode.window.showWarningMessage(status.summary, 'Update Cache', 'Cancel');
+  if (choice === 'Update Cache') {
+    await refreshRobotDriverCacheCommand();
+  }
+}
+
 async function openDriverDocsCommand(): Promise<void> {
   const docsRoot = await getDriverDocsRoot();
   await DriverDocsPanel.show(extensionContext.extensionUri, docsRoot);
 }
 
 async function getDriverDocsRoot(): Promise<string> {
-  const cacheDocs = path.join(getDriverCacheDir(), 'docs');
-  if (fs.existsSync(cacheDocs)) {
-    return cacheDocs;
+  const bundledDocs = path.join(extensionContext.extensionPath, 'resources', 'driver-docs');
+  if (fs.existsSync(bundledDocs)) {
+    return bundledDocs;
   }
 
+  const cacheDocs = path.join(getDriverCacheDir(), 'docs');
   try {
     await refreshRobotDriverCache();
     if (fs.existsSync(cacheDocs)) {
@@ -446,7 +499,7 @@ async function getDriverDocsRoot(): Promise<string> {
     output.appendLine(`Driver docs repo fetch failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  return path.join(extensionContext.extensionPath, 'resources', 'driver-docs');
+  return bundledDocs;
 }
 
 async function installRobotDriversCommand(): Promise<void> {
@@ -955,14 +1008,111 @@ async function hasDeployableDriverFiles(root: string): Promise<boolean> {
 
 async function refreshRobotDriverCache(): Promise<void> {
   const cacheDir = getDriverCacheDir();
-  await fs.promises.rm(cacheDir, { recursive: true, force: true });
-  await fs.promises.mkdir(path.dirname(cacheDir), { recursive: true });
+  const tmpParent = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'zebra-driver-cache-'));
+  const tmpRepo = path.join(tmpParent, 'repo');
 
   const repo = getWorkspaceConfig<string>('driverRepoUrl', DEFAULT_DRIVER_REPO) || DEFAULT_DRIVER_REPO;
-  const branch = getWorkspaceConfig<string>('driverRepoBranch', '');
-  const args = branch ? ['clone', '--depth', '1', '--branch', branch, repo, cacheDir] : ['clone', '--depth', '1', repo, cacheDir];
-  await runCommand('git', args);
-  output.appendLine(`Driver cache cloned to ${cacheDir}`);
+  const branch = getWorkspaceConfig<string>('driverRepoBranch', DEFAULT_DRIVER_REPO_BRANCH);
+  const args = branch ? ['clone', '--depth', '1', '--branch', branch, repo, tmpRepo] : ['clone', '--depth', '1', repo, tmpRepo];
+
+  try {
+    await runCommand('git', args);
+    await clearDriverCaches();
+    await fs.promises.mkdir(path.dirname(cacheDir), { recursive: true });
+    await fs.promises.rename(tmpRepo, cacheDir);
+    output.appendLine(`Driver cache refreshed from clean clone: ${cacheDir}`);
+  } finally {
+    await fs.promises.rm(tmpParent, { recursive: true, force: true });
+  }
+}
+
+async function checkDriverCacheStatus(): Promise<DriverCacheStatus> {
+  const cacheDir = getDriverCacheDir();
+  const repo = getWorkspaceConfig<string>('driverRepoUrl', DEFAULT_DRIVER_REPO) || DEFAULT_DRIVER_REPO;
+  const branch = getWorkspaceConfig<string>('driverRepoBranch', DEFAULT_DRIVER_REPO_BRANCH) || DEFAULT_DRIVER_REPO_BRANCH;
+
+  if (!fs.existsSync(path.join(cacheDir, '.git'))) {
+    return {
+      state: 'missing',
+      summary: 'Robot driver cache is missing. Update the cache to download the configured driver modules.',
+      cacheDir,
+      repo,
+      branch,
+    };
+  }
+
+  let localRevision = '';
+  let remoteRevision = '';
+  let cacheRepo = '';
+  let cacheBranch = '';
+
+  try {
+    localRevision = (await runCommand('git', ['-C', cacheDir, 'rev-parse', 'HEAD'])).trim();
+    cacheRepo = (await runCommand('git', ['-C', cacheDir, 'config', '--get', 'remote.origin.url'], true)).trim();
+    cacheBranch = (await runCommand('git', ['-C', cacheDir, 'rev-parse', '--abbrev-ref', 'HEAD'], true)).trim();
+    remoteRevision = await getRemoteDriverRevision(repo, branch);
+  } catch (err: unknown) {
+    return {
+      state: 'unknown',
+      summary: `Could not check robot driver cache freshness: ${err instanceof Error ? err.message : String(err)}`,
+      cacheDir,
+      repo,
+      branch,
+      localRevision,
+      remoteRevision,
+      cacheRepo,
+      cacheBranch,
+    };
+  }
+
+  const localShort = shortRevision(localRevision);
+  const remoteShort = shortRevision(remoteRevision);
+  const repoMatches = normalizeRepoUrl(cacheRepo) === normalizeRepoUrl(repo);
+  const branchMatches = !cacheBranch || cacheBranch === branch || cacheBranch === 'HEAD';
+
+  if (localRevision === remoteRevision && repoMatches && branchMatches) {
+    return {
+      state: 'current',
+      summary: `Robot driver cache is current at ${localShort} on ${branch}.`,
+      cacheDir,
+      repo,
+      branch,
+      localRevision,
+      remoteRevision,
+      cacheRepo,
+      cacheBranch,
+    };
+  }
+
+  const reasons = [
+    localRevision !== remoteRevision ? `cached ${localShort}, remote ${remoteShort}` : '',
+    !repoMatches ? 'cached repository differs from configured repository' : '',
+    !branchMatches ? `cached branch is ${cacheBranch}, configured branch is ${branch}` : '',
+  ].filter(Boolean).join('; ');
+
+  return {
+    state: 'stale',
+    summary: `Robot driver cache can be updated (${reasons}).`,
+    cacheDir,
+    repo,
+    branch,
+    localRevision,
+    remoteRevision,
+    cacheRepo,
+    cacheBranch,
+  };
+}
+
+async function getRemoteDriverRevision(repo: string, branch: string): Promise<string> {
+  const refs = [`refs/heads/${branch}`, `refs/tags/${branch}`, branch];
+  for (const ref of refs) {
+    const raw = (await runCommand('git', ['ls-remote', repo, ref], true)).trim();
+    const match = raw.match(/^([0-9a-f]{40})\s+/i);
+    if (match) {
+      return match[1];
+    }
+  }
+  throw new Error(`Could not find remote branch or tag ${branch} in ${repo}.`);
 }
 
 async function buildStagedProject(projectRoot: string): Promise<string> {
@@ -1576,6 +1726,18 @@ function getDriverCacheDir(): string {
   return path.join(extensionContext.globalStorageUri.fsPath, 'driver-cache');
 }
 
+function getLegacyDriverCacheDir(): string {
+  return path.join(extensionContext.globalStorageUri.fsPath, 'zbot-driver-cache');
+}
+
+async function clearDriverCaches(): Promise<void> {
+  const cacheDirs = [getDriverCacheDir(), getLegacyDriverCacheDir()];
+  for (const cacheDir of cacheDirs) {
+    await fs.promises.rm(cacheDir, { recursive: true, force: true });
+    output.appendLine(`Cleared driver cache: ${cacheDir}`);
+  }
+}
+
 function getFirmwareCacheDir(): string {
   return path.join(extensionContext.globalStorageUri.fsPath, 'firmware');
 }
@@ -1626,6 +1788,14 @@ function isAutoPort(port: string): boolean {
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, '/');
+}
+
+function shortRevision(value: string): string {
+  return value ? value.slice(0, 7) : 'unknown';
+}
+
+function normalizeRepoUrl(value: string): string {
+  return value.trim().replace(/\.git$/i, '').replace(/\/$/i, '').toLowerCase();
 }
 
 function quoteShell(value: string): string {
@@ -1964,6 +2134,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
       commandItem('Welcome', 'zebra.welcome', 'home'),
       commandItem('Initialize Project', 'zebra.initializeProject', 'new-folder'),
       commandItem('Setup Toolchain', 'zebra.setupToolchain', 'tools'),
+      commandItem('Check Driver Cache Updates', 'zebra.checkDriverCacheUpdates', 'cloud-download'),
       commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),
       commandItem('Deploy Project / User Program', 'zebra.deployProject', 'cloud-upload'),
       commandItem('Serial Monitor', 'zebra.openSerialMonitor', 'terminal'),

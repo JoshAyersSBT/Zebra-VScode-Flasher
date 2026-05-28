@@ -44,6 +44,7 @@ export type ProjectSetupAction =
   | 'initializeProject'
   | 'installRobotDrivers'
   | 'refreshRobotDriverCache'
+  | 'checkDriverCacheUpdates'
   | 'detectSerialPort'
   | 'checkProject'
   | 'openDriverHelp'
@@ -254,6 +255,7 @@ export class ProjectSetupPanel {
         <div class="actions">
           <button data-action="initializeProject" data-requires="workspace">Initialize Project</button>
           <button class="secondary" data-action="installRobotDrivers" data-requires="workspace">Install Drivers</button>
+          <button class="secondary" data-action="checkDriverCacheUpdates">Check Driver Updates</button>
           <button class="secondary" data-action="openDriverDocs">Driver Docs</button>
           <button class="secondary" data-action="checkProject" data-requires="project-toolchain">Check Python</button>
         </div>
@@ -311,6 +313,7 @@ export class ProjectSetupPanel {
         <button data-action="flashFirmware" data-requires="toolchain">Flash Firmware</button>
         <button data-action="deployProject" data-requires="project-toolchain">Deploy Project / User Program</button>
         <button class="secondary" data-action="openSerialMonitor" data-requires="toolchain">Serial Monitor</button>
+        <button class="secondary" data-action="checkDriverCacheUpdates">Check Driver Cache</button>
         <button class="secondary" data-action="refreshRobotDriverCache">Refresh Driver Cache</button>
         <button class="secondary" data-action="refresh">Refresh Status</button>
       </div>

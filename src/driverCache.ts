@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { runCommand } from './process';
 
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/ZbotDriver.git';
+const DEFAULT_DRIVER_REPO_BRANCH = 'codex/C-Core-modules';
 
 export function getGlobalDriverCacheDir(context: vscode.ExtensionContext): string {
   return path.join(context.globalStorageUri.fsPath, 'zbot-driver-cache');
@@ -27,7 +28,7 @@ export function robotDirHasDrivers(robotDir: string): boolean {
 export async function refreshDriverCache(context: vscode.ExtensionContext, out: vscode.OutputChannel): Promise<string> {
   const config = vscode.workspace.getConfiguration('zebra');
   const repoUrl = (config.get<string>('driverRepoUrl') || DEFAULT_DRIVER_REPO).trim();
-  const branch = (config.get<string>('driverRepoBranch') || '').trim();
+  const branch = (config.get<string>('driverRepoBranch') || DEFAULT_DRIVER_REPO_BRANCH).trim();
   const cacheDir = getGlobalDriverCacheDir(context);
   const tmpParent = fs.mkdtempSync(path.join(os.tmpdir(), 'zbot-driver-repo-'));
   const tmpRepo = path.join(tmpParent, 'repo');
@@ -48,7 +49,7 @@ export async function refreshDriverCache(context: vscode.ExtensionContext, out: 
       throw new Error(`No robot/ driver directory found in repository: ${repoUrl}`);
     }
 
-    fs.rmSync(cacheDir, { recursive: true, force: true });
+    clearDriverCacheDirs(context, out);
     fs.mkdirSync(cacheDir, { recursive: true });
     copyDirectory(robotSrc, path.join(cacheDir, 'robot'), shouldCopyRuntimeFile);
 
@@ -62,6 +63,17 @@ export async function refreshDriverCache(context: vscode.ExtensionContext, out: 
   } finally {
     fs.rmSync(tmpParent, { recursive: true, force: true });
   }
+}
+
+function clearDriverCacheDirs(context: vscode.ExtensionContext, out: vscode.OutputChannel): void {
+  for (const cacheDir of [getGlobalDriverCacheDir(context), getLegacyDriverCacheDir(context)]) {
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+    out.appendLine(`Cleared driver cache: ${cacheDir}`);
+  }
+}
+
+function getLegacyDriverCacheDir(context: vscode.ExtensionContext): string {
+  return path.join(context.globalStorageUri.fsPath, 'driver-cache');
 }
 
 export async function ensureRobotDriversForProject(
