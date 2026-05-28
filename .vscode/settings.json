@@ -1,3 +1,4 @@
 {
-  "zebra.port": "COM7"
+  "zebra.port": "COM7",
+  "zebra.deployTransport": "serial"
 }

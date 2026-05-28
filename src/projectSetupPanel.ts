@@ -28,6 +28,11 @@ export interface ProjectSetupState {
       score: number;
     }>;
   };
+  deploy: {
+    transport: 'serial' | 'ble';
+    bleName: string;
+    bleChunkSize: number;
+  };
 }
 
 export type ProjectSetupAction =
@@ -44,7 +49,9 @@ export type ProjectSetupAction =
   | 'openDriverHelp'
   | 'deployProject'
   | 'flashFirmware'
-  | 'openSerialMonitor';
+  | 'openSerialMonitor'
+  | 'setSerialDeploy'
+  | 'setBleDeploy';
 
 export class ProjectSetupPanel {
   private static currentPanel: ProjectSetupPanel | undefined;
@@ -202,6 +209,11 @@ export class ProjectSetupPanel {
     .ports { max-height: 170px; overflow: auto; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
     .port { font-size: 12px; color: var(--muted); margin-bottom: 7px; }
     .empty { color: var(--muted); font-size: 12px; }
+    .hint { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .mode-list { display: grid; gap: 8px; margin-top: 12px; }
+    .mode { border: 1px solid var(--border); border-radius: 6px; padding: 10px; color: var(--muted); line-height: 1.4; }
+    .mode strong { display: block; color: var(--fg); margin-bottom: 3px; }
+    .mode.active { border-color: var(--button); background: color-mix(in srgb, var(--button), transparent 86%); }
     .command-card { margin-top: 14px; }
     code { color: var(--vscode-textPreformat-foreground); }
     @media (max-width: 760px) {
@@ -227,7 +239,7 @@ export class ProjectSetupPanel {
           <div class="step">Create or open a Zebra project so <code>zebra.json</code>, <code>main.py</code>, and <code>robot/</code> are in place.</div>
           <div class="step">Run toolchain setup, then install USB UART drivers if your board is not detected.</div>
           <div class="step">Put the ESP32 into bootloader mode, choose Flash Firmware, and write MicroPython to the board.</div>
-          <div class="step">Detect the serial port, deploy the project files, then open the serial monitor to watch boot logs.</div>
+          <div class="step">Use serial deploy once to install or refresh the runtime, then switch to Bluetooth when you only need to update <code>user_main.py</code>.</div>
         </div>
       </section>
     </div>
@@ -267,13 +279,35 @@ export class ProjectSetupPanel {
           <button class="secondary" data-action="refresh">Refresh</button>
         </div>
       </section>
+
+      <section class="card">
+        <h2>Upload Method</h2>
+        <div id="deployBadge" class="status warn"><span class="dot"></span><span>Checking</span></div>
+        <div class="rows" id="deployRows"></div>
+        <div class="mode-list">
+          <div id="serialMode" class="mode">
+            <strong>Serial install</strong>
+            Installs the staged runtime, boot file, and robot drivers over USB. Use this first or whenever the board runtime changes.
+          </div>
+          <div id="bleMode" class="mode">
+            <strong>Bluetooth install</strong>
+            Uploads only <code>user_main.py</code> to the board named <code id="bleNameInline">ZebraBot</code>. Use after the board already has the Zebra BLE runtime.
+          </div>
+        </div>
+        <p class="hint">Bluetooth upload uses <code>zebra.deployTransport</code>, <code>zebra.bleName</code>, and <code>zebra.bleChunkSize</code>.</p>
+        <div class="actions">
+          <button data-action="setBleDeploy" data-requires="workspace">Use Bluetooth Upload</button>
+          <button class="secondary" data-action="setSerialDeploy" data-requires="workspace">Use Serial Upload</button>
+          <button data-action="deployProject" data-requires="project-toolchain">Deploy Current Mode</button>
+        </div>
+      </section>
     </div>
 
     <section class="card command-card">
       <h2>Commands</h2>
       <div class="actions">
         <button data-action="flashFirmware" data-requires="toolchain">Flash Firmware</button>
-        <button data-action="deployProject" data-requires="project-toolchain">Deploy Project</button>
+        <button data-action="deployProject" data-requires="project-toolchain">Deploy Project / User Program</button>
         <button class="secondary" data-action="openSerialMonitor" data-requires="toolchain">Serial Monitor</button>
         <button class="secondary" data-action="refreshRobotDriverCache">Refresh Driver Cache</button>
         <button class="secondary" data-action="refresh">Refresh Status</button>
@@ -338,7 +372,7 @@ export class ProjectSetupPanel {
       setBadge('toolBadge', state.toolchain.installed ? 'ok' : 'bad', state.toolchain.installed ? 'Installed' : 'Missing');
       rows('toolRows', [
         ['Python', state.toolchain.installed ? state.toolchain.pythonPath : 'Not installed'],
-        ['Packages', state.toolchain.installed ? 'pyserial, mpremote, esptool' : 'Run setup'],
+        ['Packages', state.toolchain.installed ? 'pyserial, mpremote, esptool, bleak' : 'Run setup'],
         ['Native C', state.toolchain.nativeSummary || 'Optional'],
       ]);
 
@@ -362,6 +396,18 @@ export class ProjectSetupPanel {
         div.textContent = p.device + ' - ' + (p.description || p.manufacturer || 'serial device') + ' - score=' + p.score;
         ports.appendChild(div);
       });
+
+      const deploy = state.deploy || { transport: 'serial', bleName: 'ZebraBot', bleChunkSize: 12 };
+      const isBle = deploy.transport === 'ble';
+      setBadge('deployBadge', isBle ? 'ok' : 'warn', isBle ? 'Bluetooth user program upload' : 'Serial full project install');
+      rows('deployRows', [
+        ['Current mode', isBle ? 'Bluetooth' : 'Serial'],
+        ['BLE name', deploy.bleName || 'ZebraBot'],
+        ['BLE chunk', String(deploy.bleChunkSize || 12)],
+      ]);
+      document.getElementById('serialMode').classList.toggle('active', !isBle);
+      document.getElementById('bleMode').classList.toggle('active', isBle);
+      document.getElementById('bleNameInline').textContent = deploy.bleName || 'ZebraBot';
 
       updateButtons();
     }

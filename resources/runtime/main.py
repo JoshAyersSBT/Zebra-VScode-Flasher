@@ -2,6 +2,49 @@ import time
 import uasyncio as asyncio
 from machine import I2C, Pin
 
+PREACTIVE_BLE = None
+
+try:
+    import builtins
+    PREACTIVE_BLE = getattr(builtins, "_zbot_preactive_ble", None)
+except Exception:
+    PREACTIVE_BLE = None
+
+if PREACTIVE_BLE is None:
+    try:
+        import bluetooth
+        import gc
+
+        _early_ble = bluetooth.BLE()
+        if _early_ble.active():
+            PREACTIVE_BLE = _early_ble
+            print("[INFO] BOOT: using active BLE controller")
+        else:
+            for _early_ble_attempt in range(1, 4):
+                try:
+                    try:
+                        _early_ble.active(False)
+                    except Exception:
+                        pass
+                    gc.collect()
+                    time.sleep_ms(250 * _early_ble_attempt)
+                    _early_ble.active(True)
+                    PREACTIVE_BLE = _early_ble
+                    print("[INFO] BOOT: BLE controller preactivated early")
+                    break
+                except Exception as _early_ble_err:
+                    print("[ERR] BLE_EARLY_PREACTIVE_{} {}".format(_early_ble_attempt, repr(_early_ble_err)))
+                    time.sleep_ms(400 * _early_ble_attempt)
+    except Exception as _early_ble_import_err:
+        print("[ERR] BLE_EARLY_PREIMPORT {}".format(repr(_early_ble_import_err)))
+else:
+    print("[INFO] BOOT: using boot.py BLE controller")
+
+try:
+    import bluetooth
+except Exception:
+    bluetooth = None
+
 import robot.config as robot_config
 
 from robot.motors import Motor
@@ -13,6 +56,7 @@ from robot.tca9548a import TCA9548A
 from robot.sensor_hub import SensorHub
 from robot.motor_feedback import MotorFeedback
 from robot.motor_scan import MotorScanner
+from robot.button import ButtonManager
 from robot.debug_io import (
     info,
     warn,
@@ -20,7 +64,6 @@ from robot.debug_io import (
     diag,
     state,
     set_ble_sink,
-    replay_boot_log,
 )
 
 SAFE_MODE_PIN = 0
@@ -78,6 +121,15 @@ MOTOR_SCAN_POWER = _cfg("MOTOR_SCAN_POWER", 25)
 MOTOR_SCAN_PULSE_MS = _cfg("MOTOR_SCAN_PULSE_MS", 250)
 MOTOR_SCAN_PERIOD_MS = _cfg("MOTOR_SCAN_PERIOD_MS", 1500)
 MOTOR_FEEDBACK_PERIOD_MS = _cfg("MOTOR_FEEDBACK_PERIOD_MS", 200)
+
+BUTTON_MAP = _cfg("BUTTON_MAP", {
+    1: {"name": "B1", "gpio": 15, "pull": "down", "active_low": False},
+    2: {"name": "B2", "gpio": 12, "pull": "down", "active_low": False},
+})
+BUTTON_DEBOUNCE_MS = _cfg("BUTTON_DEBOUNCE_MS", 35)
+BUTTON_SCAN_PERIOD_MS = _cfg("BUTTON_SCAN_PERIOD_MS", 10)
+BUTTON_DEFAULT_PULL = _cfg("BUTTON_DEFAULT_PULL", "down")
+BUTTON_DEFAULT_ACTIVE_LOW = _cfg("BUTTON_DEFAULT_ACTIVE_LOW", False)
 
 # Optional future-facing config. Falls back cleanly to the legacy dedicated steer servo.
 SERVO_PORT_MAP = _cfg("SERVO_PORT_MAP", None)
@@ -173,8 +225,15 @@ class RobotAPI:
             "steering": {},
             "imu": {},
             "sensors": {},
+            "buttons": {},
             "services": {},
-            "user": {"running": False, "last_error": None},
+            "user": {
+                "running": False,
+                "last_error": None,
+                "kind": None,
+                "module": None,
+                "file": None,
+            },
         }
         self.handles = {}
         self.tasks = {}
@@ -199,6 +258,18 @@ class RobotAPI:
 
     def get_services(self):
         return self.status.get("services", {})
+
+    def get_button_status(self):
+        return self.status.get("buttons", {})
+
+    def get_button_snapshot(self):
+        return self.status.get("buttons", {})
+
+    def button(self, button_id=1):
+        manager = self.handles.get("button_manager")
+        if manager is None:
+            return _ZBotButton(None, button_id)
+        return _ZBotButton(self, button_id)
 
     def mark_user_display(self, hold_ms=2500):
         try:
@@ -448,6 +519,58 @@ class RobotAPI:
         return _ZBotServo(self, port)
 
 
+class _ZBotButton:
+    def __init__(self, api, button_id=1):
+        self.api = api
+        self.button_id = int(button_id)
+
+    def _button(self):
+        if self.api is None:
+            return None
+        manager = self.api.get_handle("button_manager")
+        if manager is None:
+            return None
+        return manager.button(self.button_id)
+
+    def read(self):
+        button = self._button()
+        return False if button is None else button.read()
+
+    def value(self):
+        button = self._button()
+        return 0 if button is None else button.value()
+
+    def pressed(self):
+        button = self._button()
+        return False if button is None else button.pressed()
+
+    def released(self):
+        button = self._button()
+        return True if button is None else button.released()
+
+    def was_pressed(self):
+        button = self._button()
+        return False if button is None else button.was_pressed()
+
+    def was_released(self):
+        button = self._button()
+        return False if button is None else button.was_released()
+
+    def presses(self, reset=False):
+        button = self._button()
+        return 0 if button is None else button.presses(reset=reset)
+
+    def releases(self, reset=False):
+        button = self._button()
+        return 0 if button is None else button.releases(reset=reset)
+
+    def snapshot(self):
+        button = self._button()
+        if button is None:
+            return {"id": self.button_id, "available": False, "pressed": False}
+        return button.snapshot()
+
+
 class _ZBotSensor:
     def __init__(self, api, port):
         self.api = api
@@ -499,8 +622,90 @@ class _ZBotSensor:
 
         return None
 
+    def _find_color_item(self):
+        if self.api is None:
+            return None
+
+        sensors = self.api.get_sensor_snapshot()
+        candidates = (
+            "color_port_{}".format(self.port),
+            "port{}_color".format(self.port),
+        )
+
+        for key in candidates:
+            item = sensors.get(key)
+            if isinstance(item, dict) and isinstance(item.get("value"), dict):
+                return item
+
+        for key, item in sensors.items():
+            if not isinstance(item, dict):
+                continue
+
+            value = item.get("value")
+            if not isinstance(value, dict):
+                continue
+
+            meta = item.get("meta", {})
+            key_s = str(key).lower()
+            meta_s = str(meta).lower()
+
+            if "color" in key_s and str(self.port) in key_s:
+                return item
+
+            if "color" in meta_s and str(self.port) in meta_s:
+                return item
+
+        return None
+
     def read(self):
         return self._find_snapshot_value()
+
+    def rgb(self):
+        item = self._find_color_item()
+        if item is None:
+            return None
+
+        value = item.get("value", {})
+        if not all(k in value for k in ("r", "g", "b")):
+            return None
+
+        return {
+            "r": int(value.get("r", 0)),
+            "g": int(value.get("g", 0)),
+            "b": int(value.get("b", 0)),
+            "clear": int(value.get("clear", 0)),
+        }
+
+    def color(self):
+        item = self._find_color_item()
+        if item is None:
+            return None
+
+        value = item.get("value", {})
+        color = value.get("color")
+        if color is None:
+            return None
+        return str(color)
+
+    def color_match(self):
+        item = self._find_color_item()
+        if item is None:
+            return None
+
+        value = item.get("value", {})
+        return {
+            "color": value.get("color"),
+            "confidence": int(value.get("confidence", 0)),
+            "rgb": self.rgb(),
+            "normalized": value.get("normalized"),
+            "range": item.get("meta", {}).get("range"),
+        }
+
+    def is_color(self, name):
+        color = self.color()
+        if color is None:
+            return False
+        return color.lower() == str(name).lower()
 
 
 class _ZBotServo:
@@ -589,6 +794,7 @@ class ZBot:
         self.api = api
         self._motor_wrappers = {}
         self._servo_wrappers = {}
+        self._button_wrappers = {}
 
     def bind(self, api):
         self.api = api
@@ -622,6 +828,19 @@ class ZBot:
             return False
         return self.api.notify(str(text))
 
+    def button(self, button_id=1):
+        key = int(button_id)
+        if self.api is None:
+            return _ZBotButton(None, button_id)
+
+        if key not in self._button_wrappers:
+            self._button_wrappers[key] = _ZBotButton(self.api, button_id)
+
+        return self._button_wrappers[key]
+
+    def buttons(self, button_id=1):
+        return self.button(button_id)
+
     def servo(self, port=1):
         key = int(port)
         if self.api is None:
@@ -654,6 +873,14 @@ class ZBot:
         s = self.sensor(port)
         return s.read()
 
+    def color(self, port):
+        s = self.sensor(port)
+        return s.color()
+
+    def rgb(self, port):
+        s = self.sensor(port)
+        return s.rgb()
+
     def status(self):
         if self.api is None:
             return {}
@@ -663,6 +890,11 @@ class ZBot:
         if self.api is None:
             return {}
         return self.api.get_sensor_snapshot()
+
+    def button_status(self):
+        if self.api is None:
+            return {}
+        return self.api.get_button_status()
 
     def imu(self):
         if self.api is None:
@@ -791,6 +1023,9 @@ def _sensor_port_line(api, port):
 
         if isinstance(value, dict):
             if "r" in value and "g" in value and "b" in value:
+                color = value.get("color")
+                if color:
+                    return "P{} {}".format(port, str(color)[:10])
                 return "P{} RGB".format(port)
 
         if isinstance(value, (int, float)):
@@ -831,8 +1066,11 @@ def _sensor_overview_pages(api):
     if user.get("last_error"):
         err_name = str(user.get("last_error"))[:18]
         pages.append(("ZebraBot", "User Error", err_name))
+    elif user.get("module"):
+        kind = str(user.get("kind") or "user")[:10]
+        pages.append(("ZebraBot", "User stopped", kind))
     else:
-        pages.append(("ZebraBot", "No user code", "Sensor monitor"))
+        pages.append(("ZebraBot", "Starting user", "Sensor monitor"))
 
     ports = [1, 2, 3, 4, 5, 6]
     for i in range(0, len(ports), 3):
@@ -938,7 +1176,101 @@ async def _boot_complete_message(api):
     await asyncio.sleep_ms(1200)
 
 
+def _attach_ble_teleop(api, teleop, imu=None, start_imu=True):
+    api.register_handle("teleop", teleop)
+    set_ble_sink(teleop)
+
+    motor_feedback = api.get_handle("motor_feedback")
+    motor_scanner = api.get_handle("motor_scanner")
+    motor_port_map = api.get_handle("motor_port_map", {})
+
+    teleop.motor_feedback = motor_feedback
+    teleop.motor_scanner = motor_scanner
+    teleop.motor_ports = ACTIVE_MOTOR_PORTS
+    teleop.motor_port_map = dict(motor_port_map)
+
+    sensor_hub = api.get_handle("sensor_hub")
+    if sensor_hub is not None:
+        try:
+            sensor_hub.notify = teleop.notify_line
+        except Exception as e:
+            error("BLE_SENSOR_NOTIFY_ATTACH", e)
+
+    if motor_scanner is not None:
+        try:
+            motor_scanner.notify = teleop.notify_line
+        except Exception as e:
+            error("BLE_MOTOR_NOTIFY_ATTACH", e)
+
+    if start_imu and imu is not None and api.get_handle("teleop_imu_task_started") is None:
+        imu_task_fn = getattr(teleop, "imu_task", None)
+        if imu_task_fn is not None:
+            try:
+                api.register_task("imu", asyncio.create_task(imu_task_fn()))
+                api.register_handle("teleop_imu_task_started", True)
+                info("BOOT: IMU task started")
+                state("TASK", "imu_started")
+            except Exception as e:
+                error("IMU_TASK_START", e)
+
+
+async def _deferred_ble_start_task(api, drive, steering, imu, oled):
+    await asyncio.sleep_ms(3000)
+
+    for attempt in range(1, 9):
+        if api.get_handle("teleop") is not None:
+            return
+
+        try:
+            info("BOOT: deferred BLE init attempt {}".format(attempt))
+            teleop = BleTeleop(
+                drive=drive,
+                steering=steering,
+                imu=imu,
+                imu_period_ms=MPU_PERIOD_MS,
+                oled=oled,
+            )
+            _attach_ble_teleop(api, teleop, imu=imu)
+            info("BOOT: BLE teleop initialized")
+            state("BOOT", "ble_ok")
+            return
+        except Exception as e:
+            error("BLE_DEFERRED_INIT", e)
+            state("BOOT", "ble_retry_{}".format(attempt))
+            await asyncio.sleep_ms(2500)
+
+    warn("BOOT: deferred BLE init exhausted")
+    state("BOOT", "ble_failed")
+
+
+def _detect_user_main_kind(user_main, user_fn):
+    try:
+        override = getattr(user_main, "USER_MAIN_KIND", None)
+        if override is not None:
+            kind = str(override).strip().lower()
+            if kind in ("c", "native", "python"):
+                return "c" if kind == "native" else kind
+    except Exception:
+        pass
+
+    try:
+        module_file = getattr(user_main, "__file__", None)
+        if module_file:
+            return "python"
+    except Exception:
+        pass
+
+    try:
+        if getattr(user_fn, "__code__", None) is not None:
+            return "python"
+    except Exception:
+        pass
+
+    return "c"
+
+
 async def _run_user_program(api):
+    user_main_name = "user_main"
     try:
         import user_main
     except Exception as e:
@@ -953,7 +1285,23 @@ async def _run_user_program(api):
                 pass
         return
 
+    try:
+        user_main_name = getattr(user_main, "__name__", "user_main")
+    except Exception:
+        user_main_name = "user_main"
+
     user_fn = getattr(user_main, "main", None)
+    user_file = None
+    try:
+        user_file = getattr(user_main, "__file__", None)
+    except Exception:
+        user_file = None
+
+    user_kind = _detect_user_main_kind(user_main, user_fn) if user_fn is not None else "unknown"
+    api.status["user"]["kind"] = user_kind
+    api.status["user"]["module"] = user_main_name
+    api.status["user"]["file"] = user_file
+
     if user_fn is None:
         warn("USER: user_main.main missing")
         api.status["user"]["last_error"] = "user_main.main missing"
@@ -972,21 +1320,46 @@ async def _run_user_program(api):
     teleop = api.get_handle("teleop")
     if teleop is not None:
         try:
-            teleop.notify_line("INFO USER main starting")
+            teleop.notify_line("INFO USER {} {}.main starting".format(user_kind, user_main_name))
         except Exception:
             pass
 
     try:
-        argc = None
+        result = None
+        called = False
+
         try:
             argc = user_fn.__code__.co_argcount
         except Exception:
-            pass
+            argc = None
 
         if argc == 0:
-            await user_fn()
+            result = user_fn()
+            called = True
+        elif argc is not None:
+            result = user_fn(zbot)
+            called = True
+
+        if not called:
+            try:
+                result = user_fn(zbot)
+            except TypeError:
+                result = user_fn()
+
+        if hasattr(result, "__await__") or hasattr(result, "send"):
+            await result
         else:
-            await user_fn(zbot)
+            tick_fn = getattr(user_main, "tick", None)
+            if tick_fn is not None:
+                tick_ms = int(getattr(user_main, "USER_MAIN_TICK_MS", 1000))
+                if tick_ms < 50:
+                    tick_ms = 50
+                while True:
+                    try:
+                        tick_fn(zbot)
+                    except TypeError:
+                        tick_fn()
+                    await asyncio.sleep_ms(tick_ms)
 
     except Exception as e:
         api.status["user"]["last_error"] = repr(e)
@@ -1011,6 +1384,7 @@ async def _run_user_program(api):
 async def main():
     global API
     global zbot
+    global PREACTIVE_BLE
 
     teleop = None
     sensor_hub = None
@@ -1025,6 +1399,7 @@ async def main():
     servos = {}
     motor_feedback = None
     motor_scanner = None
+    button_manager = None
 
     api = RobotAPI()
     API = api
@@ -1137,6 +1512,26 @@ async def main():
         error("RUNTIME_DRIVE_INIT", e)
 
     try:
+        button_manager = ButtonManager(
+            api=api,
+            button_map=BUTTON_MAP,
+            debounce_ms=BUTTON_DEBOUNCE_MS,
+            scan_period_ms=BUTTON_SCAN_PERIOD_MS,
+            default_pull=BUTTON_DEFAULT_PULL,
+            default_active_low=BUTTON_DEFAULT_ACTIVE_LOW,
+        )
+        button_manager.start()
+        api.register_handle("button_manager", button_manager)
+        info("BOOT: buttons initialized")
+        diag("BUTTONS {}".format(button_manager.snapshot()))
+        state("BOOT", "buttons_ok")
+    except Exception as e:
+        button_manager = None
+        error("BUTTON_INIT", e)
+        warn("BOOT: continuing without buttons")
+        state("BOOT", "buttons_failed")
+
+    try:
         base_i2c = I2C(
             TCA_I2C_ID,
             sda=Pin(TCA_SDA_GPIO),
@@ -1219,10 +1614,10 @@ async def main():
             imu=imu,
             imu_period_ms=MPU_PERIOD_MS,
             oled=oled,
+            ble=PREACTIVE_BLE,
         )
-        api.register_handle("teleop", teleop)
-        set_ble_sink(teleop)
-        replay_boot_log()
+        PREACTIVE_BLE = None
+        _attach_ble_teleop(api, teleop, imu=imu, start_imu=False)
 
         info("BOOT: BLE teleop initialized")
         state("BOOT", "ble_ok")
@@ -1230,8 +1625,8 @@ async def main():
         teleop = None
         error("BLE_INIT", e)
         _boot_oled(api, "ZebraBot", "BLE init fail", str(type(e).__name__))
-        warn("BOOT: continuing without BLE")
-        state("BOOT", "ble_failed")
+        warn("BOOT: BLE init deferred")
+        state("BOOT", "ble_deferred")
 
     try:
         notify_fn = teleop.notify_line if teleop is not None else None
@@ -1284,6 +1679,17 @@ async def main():
         motor_feedback = None
         motor_scanner = None
 
+    if teleop is None:
+        try:
+            api.register_task(
+                "ble_deferred",
+                asyncio.create_task(_deferred_ble_start_task(api, runtime_drive, steer, imu, oled)),
+            )
+            info("BOOT: deferred BLE task scheduled")
+            state("TASK", "ble_deferred_started")
+        except Exception as e:
+            error("BLE_DEFERRED_TASK", e)
+
     info("BOOT: robot boot complete")
     state("BOOT", "complete")
     api.status["boot"]["state"] = "complete"
@@ -1299,29 +1705,28 @@ async def main():
         except Exception as e:
             error("SENSOR_HUB_TASK", e)
 
-    if imu is not None and teleop is not None:
-        imu_task_fn = getattr(teleop, "imu_task", None)
-        if imu_task_fn is not None:
-            try:
-                api.register_task("imu", asyncio.create_task(imu_task_fn()))
-                info("BOOT: IMU task started")
-                state("TASK", "imu_started")
-            except Exception as e:
-                error("IMU_TASK_START", e)
-        else:
-            warn("BOOT: teleop.imu_task missing")
-            state("TASK", "imu_missing")
+    if api.get_handle("teleop_imu_task_started") is not None:
+        pass
+    elif imu is not None and teleop is not None:
+        _attach_ble_teleop(api, teleop, imu=imu)
+    elif imu is not None:
+        info("BOOT: IMU task waiting for BLE")
+        state("TASK", "imu_waiting_ble")
     else:
         info("BOOT: IMU task skipped (no IMU)")
         state("TASK", "imu_skipped")
+    ENABLE_ACTIVE_MOTOR_SCAN = False
 
     if motor_scanner is not None:
-        try:
-            api.register_task("motor_scan", asyncio.create_task(motor_scanner.task()))
-            info("BOOT: MotorScanner task started")
-            state("TASK", "motor_scan_started")
-        except Exception as e:
-            error("MOTOR_SCAN_TASK", e)
+        if ENABLE_ACTIVE_MOTOR_SCAN:
+            try:
+                api.register_task("motor_scan", asyncio.create_task(motor_scanner.task()))
+                info("BOOT: MotorScanner task started")
+                state("TASK", "motor_scan_started")
+            except Exception as e:
+                error("MOTOR_SCAN_TASK", e)
+        else:
+            warn("BOOT: active motor scan disabled during user runtime")
 
         try:
             api.register_task(
@@ -1336,6 +1741,14 @@ async def main():
             error("MOTOR_FB_TASK", e)
     else:
         warn("BOOT: motor scan tasks skipped")
+
+    if button_manager is not None:
+        try:
+            api.register_task("buttons", asyncio.create_task(button_manager.task()))
+            info("BOOT: Button task started")
+            state("TASK", "buttons_started")
+        except Exception as e:
+            error("BUTTON_TASK", e)
 
     try:
         api.register_task("api_housekeeping", asyncio.create_task(_api_housekeeping_task(api)))
@@ -1371,7 +1784,39 @@ def _safe_mode_requested():
         return False
 
 
+def _preactivate_ble_controller():
+    try:
+        import bluetooth
+        import gc
+    except Exception as e:
+        error("BLE_PREIMPORT", e)
+        return None
+
+    ble = bluetooth.BLE()
+    for attempt in range(1, 4):
+        try:
+            try:
+                ble.active(False)
+            except Exception:
+                pass
+            gc.collect()
+            time.sleep_ms(250 * attempt)
+            ble.active(True)
+            info("BOOT: BLE controller preactivated")
+            state("BOOT", "ble_controller_active")
+            return ble
+        except Exception as e:
+            error("BLE_PREACTIVE_{}".format(attempt), e)
+            time.sleep_ms(400 * attempt)
+
+    warn("BOOT: BLE controller preactivation failed")
+    state("BOOT", "ble_controller_failed")
+    return None
+
+
 def boot():
+    global PREACTIVE_BLE
+
     info("BOOT: main.py entry")
 
     if _safe_mode_requested():
@@ -1389,6 +1834,8 @@ def boot():
         print("BOOT: launch in {}...".format(remaining))
         time.sleep(1)
 
+    if PREACTIVE_BLE is None:
+        PREACTIVE_BLE = _preactivate_ble_controller()
     asyncio.run(main())
 
 

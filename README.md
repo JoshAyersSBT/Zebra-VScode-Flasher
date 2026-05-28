@@ -23,7 +23,7 @@ Open the Zebra activity bar panel or use the command palette:
 1. Open a project folder in VS Code.
 2. Run `Zebra: Initialize Project`.
    - This now also runs the Zebra toolchain setup.
-   - It creates/checks the extension venv and installs `pyserial`, `mpremote`, and `esptool`.
+   - It creates/checks the extension venv and installs `pyserial`, `mpremote`, `esptool`, and `bleak`.
    - For native C driver/user_main builds, also run `Zebra: Setup Native C Firmware Toolchain`.
 3. Connect the ESP32.
 4. Run `Zebra: Detect ESP32 Serial Port`.
@@ -55,6 +55,7 @@ The extension creates an isolated Python virtual environment in VS Code global e
 - `pyserial`
 - `mpremote`
 - `esptool`
+- `bleak`
 
 If Python 3 is not already available, `Zebra: Setup Toolchain` and `Zebra: Initialize Project` attempt a platform-specific install first:
 
@@ -68,7 +69,7 @@ Set `zebra.pythonPath` only when you want to force a specific Python executable.
 
 `Zebra: Setup Native C Firmware Toolchain` prepares the dependencies used to build the Zebra C driver modules and native `user_main.c` firmware.
 
-On Windows, it bootstraps WSL Debian when needed by opening a terminal with `wsl.exe --install -d Debian`. If a reboot or first-run Linux user setup is required, finish that step and run the command again. Once Debian is available, it installs Linux build packages, clones MicroPython `v1.28.0`, clones ESP-IDF `v5.5.1`, installs ESP-IDF tools for `esp32`, builds `mpy-cross`, and prepares ESP32 submodules.
+On Windows, it bootstraps WSL Debian when needed and creates a default Linux flasher account automatically. The account defaults to username `flasher` and password `flasher`; override these with `zebra.wslFlasherUsername` and `zebra.wslFlasherPassword` before setup if you need different credentials. If Windows requires a reboot during WSL installation, reboot and run the command again. Once Debian is available, it installs Linux build packages, clones MicroPython `v1.28.0`, clones ESP-IDF `v5.5.1`, installs ESP-IDF tools for `esp32`, builds `mpy-cross`, and prepares ESP32 submodules.
 
 On macOS, it uses Homebrew to install the native build packages, then clones and prepares the same MicroPython and ESP-IDF toolchains. On Linux, it supports `apt`, `dnf`, and `pacman`; other distributions get a clear package list to install manually. The build root defaults to `~/zbot-fw` and can be changed with `zebra.nativeBuildRoot`.
 
@@ -97,13 +98,35 @@ Use `Zebra: Open USB UART Driver Help` to open the official driver pages.
 
 The deploy command stages the runtime `main.py` and `robot/` package, then uploads the workspace `main.py` as `user_main.py`, matching the Zebra teleop flasher workflow.
 
+## BLE user program deploy
+
+Open `Zebra: Project Setup`, use the Upload Method card, and choose
+`Use Bluetooth Upload` to set `zebra.deployTransport` to `ble`. This uploads
+only the staged `user_main.py` over ZebraBot BLE UART. The board must already be
+running a Zebra runtime with BLE teleop support. The BLE deploy path uses the
+extension toolchain's `bleak` package, sends the robot into quiet mode, writes
+`/user_main.py`, and requests a reset.
+
+Before uploading, the extension scans nearby BLE devices and shows a picker so
+you can choose the correct board. Devices advertising `ZebraBot` or the Zebra
+UART service are listed as likely Zebra targets, but other nearby devices are
+shown too.
+
+Useful settings:
+
+- `zebra.bleName`: defaults to `ZebraBot`
+- `zebra.bleChunkSize`: defaults to `12` for conservative BLE writes
+
+Use `serial` deploy when installing or refreshing the full runtime and `robot/`
+driver package.
+
 
 ## Initialize Project includes Toolchain Setup
 
 `Zebra: Initialize Project` now behaves like a PlatformIO-style first-run setup:
 
 1. Creates or checks the extension-managed Python virtual environment.
-2. Installs or updates `pyserial`, `mpremote`, and `esptool`.
+2. Installs or updates `pyserial`, `mpremote`, `esptool`, and `bleak`.
 3. Creates `zebra.json`.
 4. Creates a starter `main.py` when needed.
 5. Creates `.vscode/settings.json` with Zebra defaults.

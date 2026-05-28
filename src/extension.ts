@@ -18,10 +18,12 @@ import {
   ProjectSetupState,
 } from './projectSetupPanel';
 
-const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool'];
+const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool', 'bleak'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git';
 const DEFAULT_MICROPYTHON_FIRMWARE_URL = 'https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin';
 const DEFAULT_NATIVE_BUILD_ROOT = '~/zbot-fw';
+const DEFAULT_WSL_FLASHER_USERNAME = 'flasher';
+const DEFAULT_WSL_FLASHER_PASSWORD = 'flasher';
 const MICROPYTHON_TAG = 'v1.28.0';
 const ESP_IDF_TAG = 'v5.5.1';
 const SKIP_DIRS = new Set(['__pycache__', '.git', '.vscode', '.idea', '.mypy_cache', '.pytest_cache', 'node_modules', '.venv', 'venv', 'dist', 'build']);
@@ -41,6 +43,14 @@ interface ProjectStatus {
   hasRuntimeMain: boolean;
   hasRuntimeRobot: boolean;
   problems: string[];
+}
+
+interface BleDeviceInfo {
+  address: string;
+  name: string;
+  localName: string;
+  services: string[];
+  isZebraCandidate: boolean;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -123,6 +133,10 @@ async function getProjectSetupState(): Promise<ProjectSetupState> {
   const toolPython = getToolPythonPath();
   const toolchainReady = fs.existsSync(toolPython);
   const configuredPort = getWorkspaceConfig<string>('port', 'AUTO');
+  const deployTransportRaw = getWorkspaceConfig<string>('deployTransport', 'serial').trim().toLowerCase();
+  const deployTransport = deployTransportRaw === 'ble' ? 'ble' : 'serial';
+  const bleName = getWorkspaceConfig<string>('bleName', 'ZebraBot') || 'ZebraBot';
+  const bleChunkSize = Math.max(1, Math.min(128, getWorkspaceConfig<number>('bleChunkSize', 12) || 12));
   const serialPorts: ProjectSetupState['serial']['ports'] = [];
   let serialSummary = toolchainReady ? 'Not checked' : 'Install the toolchain first';
   let serialChecked = false;
@@ -172,6 +186,11 @@ async function getProjectSetupState(): Promise<ProjectSetupState> {
       summary: serialSummary,
       ports: serialPorts,
     },
+    deploy: {
+      transport: deployTransport,
+      bleName,
+      bleChunkSize,
+    },
   };
 }
 
@@ -218,6 +237,12 @@ async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> 
       break;
     case 'openDriverHelp':
       await openDriverHelp();
+      break;
+    case 'setSerialDeploy':
+      await vscode.workspace.getConfiguration('zebra').update('deployTransport', 'serial', vscode.ConfigurationTarget.Workspace);
+      break;
+    case 'setBleDeploy':
+      await vscode.workspace.getConfiguration('zebra').update('deployTransport', 'ble', vscode.ConfigurationTarget.Workspace);
       break;
   }
 
@@ -282,6 +307,8 @@ async function setupNativeToolchainCommand(): Promise<void> {
     if (!distro) {
       return;
     }
+
+    await ensureWindowsWslFlasherUser(distro);
 
     const script = nativeLinuxSetupScript(getNativeBuildRoot());
     const terminal = vscode.window.createTerminal('Zebra Native C Setup');
@@ -407,6 +434,14 @@ async function deployProjectCommand(): Promise<void> {
   }
 
   const toolPython = await ensureToolPython();
+  const deployTransport = getWorkspaceConfig<string>('deployTransport', 'serial').trim().toLowerCase();
+
+  if (deployTransport === 'ble') {
+    await deployUserProgramWithBle(root, toolPython);
+    void vscode.window.showInformationMessage('Zebra user program deployed over BLE.');
+    return;
+  }
+
   let port = getWorkspaceConfig<string>('port', 'AUTO');
   if (!port || isAutoPort(port)) {
     port = await resolveSerialPort(toolPython);
@@ -443,6 +478,97 @@ async function deployProjectCommand(): Promise<void> {
   );
 
   void vscode.window.showInformationMessage('Zebra project deployed.');
+}
+
+async function deployUserProgramWithBle(root: string, toolPython: string): Promise<void> {
+  await ensurePythonPackage(toolPython, 'bleak');
+
+  const bleName = getWorkspaceConfig<string>('bleName', 'ZebraBot') || 'ZebraBot';
+  const chunkSize = Math.max(1, Math.min(128, getWorkspaceConfig<number>('bleChunkSize', 12) || 12));
+  const selectedDevice = await pickBleDevice(toolPython, bleName);
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `Zebra: BLE upload to ${selectedDevice.label}`, cancellable: false },
+    async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
+      const stage = await buildStagedProject(root);
+      const userMain = path.join(stage, 'user_main.py');
+      if (!fs.existsSync(userMain)) {
+        throw new Error('Staged user_main.py was not created.');
+      }
+
+      output.appendLine(`BLE deploy stage: ${stage}`);
+      output.appendLine(`BLE uploading ${userMain} to /user_main.py on ${selectedDevice.label} (${selectedDevice.address})`);
+      progress.report({ message: 'Uploading user_main.py over BLE...' });
+
+      await runCommand(toolPython, [
+        getBlePutScriptPath(),
+        userMain,
+        '--name',
+        bleName,
+        '--address',
+        selectedDevice.address,
+        '--chunk-size',
+        String(chunkSize),
+        '--reset',
+      ]);
+    },
+  );
+}
+
+async function pickBleDevice(toolPython: string, preferredName: string): Promise<{ address: string; label: string }> {
+  const devices = await listBleDevices(toolPython, preferredName);
+  if (!devices.length) {
+    throw new Error('No nearby BLE devices found. Make sure the board is powered and advertising.');
+  }
+
+  const items = devices.map(device => {
+    const label = device.name || device.localName || '(unnamed BLE device)';
+    const services = device.services.slice(0, 3).join(', ');
+    return {
+      label: device.isZebraCandidate ? `$(radio-tower) ${label}` : label,
+      description: device.address,
+      detail: [
+        device.isZebraCandidate ? 'Likely Zebra target' : 'Nearby BLE device',
+        services ? `services: ${services}` : '',
+      ].filter(Boolean).join(' - '),
+      device,
+      picked: device.isZebraCandidate,
+    };
+  });
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: 'Select BLE device for Zebra upload',
+    placeHolder: `Choose ${preferredName} or another nearby BLE device`,
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+
+  if (!picked) {
+    throw new Error('BLE device selection cancelled.');
+  }
+
+  const label = picked.device.name || picked.device.localName || picked.device.address;
+  output.appendLine(`Selected BLE device: ${label} (${picked.device.address})`);
+  return { address: picked.device.address, label };
+}
+
+async function listBleDevices(toolPython: string, preferredName: string): Promise<BleDeviceInfo[]> {
+  const raw = await runCommand(toolPython, [
+    getBlePutScriptPath(),
+    '--list',
+    '--json',
+    '--name',
+    preferredName,
+    '--scan-timeout',
+    '8',
+  ]);
+
+  try {
+    const parsed = JSON.parse(raw) as BleDeviceInfo[];
+    return parsed.filter(device => !!device.address);
+  } catch (err: unknown) {
+    throw new Error(`Could not parse BLE device scan results: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 async function flashFirmwareCommand(): Promise<void> {
@@ -815,6 +941,10 @@ async function buildStagedProject(projectRoot: string): Promise<string> {
   if (!fs.existsSync(runtimeRobot)) throw new Error(`Runtime robot/ folder not found: ${runtimeRobot}`);
   if (!fs.existsSync(userEntry)) throw new Error('Project must contain main.py or user_main.py.');
 
+  const runtimeBoot = path.join(path.dirname(runtimeMain), 'boot.py');
+  if (fs.existsSync(runtimeBoot)) {
+    await fs.promises.copyFile(runtimeBoot, path.join(stage, 'boot.py'));
+  }
   await fs.promises.copyFile(runtimeMain, path.join(stage, 'main.py'));
   await copyTree(runtimeRobot, path.join(stage, 'robot'));
   await fs.promises.copyFile(userEntry, path.join(stage, 'user_main.py'));
@@ -933,6 +1063,27 @@ async function runMpremoteCommand(toolPython: string, port: string, args: string
     await sleep(1500);
     return runCommand(toolPython, commandArgs, ignoreFailure);
   }
+}
+
+async function ensurePythonPackage(toolPython: string, packageName: string): Promise<void> {
+  if (await canRunCommand(toolPython, ['-c', `import ${packageName}`])) {
+    return;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    `The Zebra Python toolchain needs ${packageName} for BLE deploy.`,
+    `Install ${packageName}`,
+    'Cancel',
+  );
+  if (choice !== `Install ${packageName}`) {
+    throw new Error(`BLE deploy requires Python package ${packageName}.`);
+  }
+
+  await runCommand(toolPython, ['-m', 'pip', 'install', '--upgrade', packageName]);
+}
+
+function getBlePutScriptPath(): string {
+  return path.join(extensionContext.extensionPath, 'resources', 'tools', 'ble_put.py');
 }
 
 async function updateZebraJson(patch: Record<string, unknown>): Promise<void> {
@@ -1365,10 +1516,26 @@ function getNativeBuildRoot(): string {
   return getWorkspaceConfig<string>('nativeBuildRoot', DEFAULT_NATIVE_BUILD_ROOT) || DEFAULT_NATIVE_BUILD_ROOT;
 }
 
+function getWslFlasherUsername(): string {
+  const username = (getWorkspaceConfig<string>('wslFlasherUsername', DEFAULT_WSL_FLASHER_USERNAME) || DEFAULT_WSL_FLASHER_USERNAME).trim();
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(username)) {
+    throw new Error('zebra.wslFlasherUsername must be a valid Linux username: lowercase letters, numbers, underscore, or dash; it must start with a letter or underscore.');
+  }
+  return username;
+}
+
+function getWslFlasherPassword(): string {
+  const password = getWorkspaceConfig<string>('wslFlasherPassword', DEFAULT_WSL_FLASHER_PASSWORD) || DEFAULT_WSL_FLASHER_PASSWORD;
+  if (!password || /[\r\n]/.test(password)) {
+    throw new Error('zebra.wslFlasherPassword must be non-empty and cannot contain line breaks.');
+  }
+  return password;
+}
+
 function getNativeToolchainSummary(): string {
   const root = getNativeBuildRoot();
   if (process.platform === 'win32') {
-    return `Optional WSL build root ${root}`;
+    return `Optional WSL build root ${root}; user ${getWslFlasherUsername()}`;
   }
   return `Optional build root ${root}`;
 }
@@ -1400,6 +1567,10 @@ function quoteShell(value: string): string {
 
 function quotePowerShellArg(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function quoteShellLiteral(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 async function ensureWindowsWslDebian(): Promise<string | undefined> {
@@ -1445,12 +1616,77 @@ async function ensureWindowsWslDebian(): Promise<string | undefined> {
 }
 
 function openWindowsWslInstallTerminal(wslAlreadyInstalled: boolean): void {
+  const username = getWslFlasherUsername();
+  const password = getWslFlasherPassword();
   const terminal = vscode.window.createTerminal('Zebra WSL Debian Install');
   terminal.show();
-  const command = wslAlreadyInstalled ? 'wsl.exe --install -d Debian' : 'wsl.exe --install -d Debian';
+  const script = windowsWslInstallPowerShellScript('Debian', username, password);
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const command = `powershell.exe -NoExit -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
   terminal.sendText(command, true);
-  output.appendLine(`Opened terminal for WSL Debian install: ${command}`);
-  void vscode.window.showInformationMessage('WSL Debian install started. If Windows asks for a reboot or first-run Linux user setup, complete that, then run Zebra: Setup Native C Firmware Toolchain again.');
+  output.appendLine(`Opened terminal for WSL Debian install${wslAlreadyInstalled ? '' : ' and WSL bootstrap'}; default Linux user will be ${username}.`);
+  void vscode.window.showInformationMessage(`WSL Debian install started. Zebra will create the ${username} Linux user when Debian is ready; reboot first if Windows asks.`);
+}
+
+function windowsWslInstallPowerShellScript(distro: string, username: string, password: string): string {
+  const provisioningScript = wslFlasherUserProvisioningScript(username, password);
+  return [
+    '$ErrorActionPreference = "Stop"',
+    `$distro = ${quotePowerShellArg(distro)}`,
+    'Write-Host "Installing WSL Debian for Zebra..."',
+    'wsl.exe --install -d $distro --no-launch',
+    'if ($LASTEXITCODE -ne 0) {',
+    '  Write-Host "If Windows requested a reboot, reboot and run Zebra: Setup Native C Firmware Toolchain again."',
+    '  exit $LASTEXITCODE',
+    '}',
+    '$provision = @\'',
+    provisioningScript,
+    '\'@',
+    'Write-Host "Creating Zebra WSL flasher user..."',
+    '$provision | wsl.exe -d $distro -u root -- bash -s',
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+    'wsl.exe --terminate $distro | Out-Null',
+    'Write-Host "Zebra WSL Debian is ready. Run Zebra: Setup Native C Firmware Toolchain again to install firmware build dependencies."',
+  ].join('\n');
+}
+
+async function ensureWindowsWslFlasherUser(distro: string): Promise<void> {
+  const username = getWslFlasherUsername();
+  const password = getWslFlasherPassword();
+  output.appendLine(`Ensuring WSL distro ${distro} has Zebra flasher user ${username}.`);
+  await runCommandWithInput(
+    'wsl.exe',
+    ['-d', distro, '-u', 'root', '--', 'bash', '-s'],
+    wslFlasherUserProvisioningScript(username, password),
+    `wsl.exe -d ${distro} -u root -- bash -s < Zebra flasher user setup`,
+  );
+  await runCommand('wsl.exe', ['--terminate', distro], true);
+}
+
+function wslFlasherUserProvisioningScript(username: string, password: string): string {
+  return [
+    'set -e',
+    `ZEBRA_USER=${quoteShellLiteral(username)}`,
+    `ZEBRA_PASSWORD=${quoteShellLiteral(password)}`,
+    'if command -v apt-get >/dev/null 2>&1 && ! command -v sudo >/dev/null 2>&1; then',
+    '  apt-get update',
+    '  apt-get install -y sudo',
+    'fi',
+    'if ! id -u "$ZEBRA_USER" >/dev/null 2>&1; then',
+    '  useradd -m -s /bin/bash "$ZEBRA_USER"',
+    'fi',
+    'printf "%s:%s\\n" "$ZEBRA_USER" "$ZEBRA_PASSWORD" | chpasswd',
+    'if getent group sudo >/dev/null 2>&1; then',
+    '  usermod -aG sudo "$ZEBRA_USER"',
+    'elif getent group wheel >/dev/null 2>&1; then',
+    '  usermod -aG wheel "$ZEBRA_USER"',
+    'fi',
+    'mkdir -p /etc',
+    'printf "[user]\\ndefault=%s\\n" "$ZEBRA_USER" > /etc/wsl.conf',
+    'mkdir -p "/home/$ZEBRA_USER"',
+    'chown -R "$ZEBRA_USER:$ZEBRA_USER" "/home/$ZEBRA_USER"',
+    'echo "Zebra WSL flasher user is ready: $ZEBRA_USER"',
+  ].join('\n');
 }
 
 async function listWslDistros(): Promise<string[]> {
@@ -1560,6 +1796,49 @@ function runCommand(command: string, args: string[], ignoreFailure = false): Pro
   });
 }
 
+function runCommandWithInput(command: string, args: string[], input: string, logLine: string, ignoreFailure = false): Promise<string> {
+  return new Promise((resolve, reject) => {
+    output.appendLine(`>> ${logLine}`);
+
+    const child = cp.spawn(command, args, {
+      shell: false,
+      cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+      env: getProcessEnvForTools(),
+      windowsHide: true,
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stdout += text;
+      output.append(text);
+    });
+
+    child.stderr.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stderr += text;
+      output.append(text);
+    });
+
+    child.on('error', (err: Error) => {
+      if (ignoreFailure) resolve(stdout.trim());
+      else reject(err);
+    });
+
+    child.on('close', (code: number | null) => {
+      if (code !== 0 && !ignoreFailure) {
+        reject(new Error(`Command failed with code ${code}: ${logLine}\n${stderr}`));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+
+    child.stdin.end(input);
+  });
+}
+
 function starterMainPy(): string {
   return `import uasyncio as asyncio
 import gc
@@ -1618,7 +1897,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
       commandItem('Initialize Project', 'zebra.initializeProject', 'new-folder'),
       commandItem('Setup Toolchain', 'zebra.setupToolchain', 'tools'),
       commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),
-      commandItem('Deploy Project', 'zebra.deployProject', 'cloud-upload'),
+      commandItem('Deploy Project / User Program', 'zebra.deployProject', 'cloud-upload'),
       commandItem('Serial Monitor', 'zebra.openSerialMonitor', 'terminal'),
       commandItem('Flash Firmware', 'zebra.flashFirmware', 'zap'),
     ];

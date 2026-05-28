@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.11",
+  "version": "0.0.13",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"
@@ -218,6 +218,16 @@
           "default": "~/zbot-fw",
           "description": "Linux/WSL directory used for native Zebra MicroPython firmware build dependencies."
         },
+        "zebra.wslFlasherUsername": {
+          "type": "string",
+          "default": "flasher",
+          "description": "Linux username Zebra creates and sets as the default user in its WSL Debian setup."
+        },
+        "zebra.wslFlasherPassword": {
+          "type": "string",
+          "default": "flasher",
+          "description": "Password assigned to zebra.wslFlasherUsername during Zebra WSL Debian setup."
+        },
         "zebra.runtimePath": {
           "type": "string",
           "default": "",
@@ -242,6 +252,24 @@
           "type": "number",
           "default": 115200,
           "description": "Baud rate used for the serial monitor terminal."
+        },
+        "zebra.deployTransport": {
+          "type": "string",
+          "enum": ["serial", "ble"],
+          "default": "serial",
+          "description": "Transport used by Zebra: Deploy Project. Serial deploys the full staged runtime with mpremote. BLE uploads only the staged user_main.py over ZebraBot BLE UART."
+        },
+        "zebra.bleName": {
+          "type": "string",
+          "default": "ZebraBot",
+          "description": "BLE advertised name used for Zebra user program uploads."
+        },
+        "zebra.bleChunkSize": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 128,
+          "description": "Raw user program bytes per BLE upload chunk. The default is conservative for 20-byte BLE writes."
         }
       }
     }

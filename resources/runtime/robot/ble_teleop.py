@@ -2,6 +2,8 @@
 import os
 import sys
 import bluetooth
+import gc
+import time
 import uasyncio as asyncio
 import ubinascii
 from micropython import const
@@ -38,9 +40,10 @@ def _uuid_bytes(uuid_obj):
         return b""
 
 
-def _adv_payload(name=None, services=None):
+def _adv_payload(name=None, services=None, flags=True):
     payload = bytearray()
-    payload = _append_adv_field(payload, 0x01, b"\x06")
+    if flags:
+        payload = _append_adv_field(payload, 0x01, b"\x06")
 
     if name:
         nb = name.encode()
@@ -86,9 +89,14 @@ def _mkdirs(path):
 
 
 class BleTeleop:
-    def __init__(self, drive, steering, imu=None, imu_period_ms=10, oled=None):
-        self._ble = bluetooth.BLE()
-        self._ble.active(True)
+    def __init__(self, drive, steering, imu=None, imu_period_ms=10, oled=None, ble=None):
+        self._ble = ble if ble is not None else bluetooth.BLE()
+        try:
+            active = self._ble.active()
+        except Exception:
+            active = False
+        if not active:
+            self._activate_ble()
         self._ble.irq(self._irq)
 
         ((self._tx_handle, self._rx_handle),) = self._ble.gatts_register_services((_UART_SERVICE,))
@@ -121,6 +129,7 @@ class BleTeleop:
         self._tx_queue = []
         self._tx_queue_max = 80
         self._tx_drop_count = 0
+        self._quiet = False
 
         # BLE should not interrupt user code unless BLE has actively taken
         # control of motion and stop_on_disconnect is enabled.
@@ -149,7 +158,8 @@ class BleTeleop:
             except Exception:
                 pass
 
-        self._adv_data = _adv_payload(BLE_NAME, services=[_UART_UUID])
+        self._adv_data = _adv_payload(BLE_NAME)
+        self._resp_data = _adv_payload(services=[_UART_UUID], flags=False)
         self._advertise()
 
         try:
@@ -157,6 +167,32 @@ class BleTeleop:
             asyncio.create_task(self._tx_task())
         except Exception as e:
             print("BLE task start failed:", e)
+
+    def _activate_ble(self):
+        last_err = None
+
+        for attempt in range(1, 4):
+            try:
+                try:
+                    self._ble.active(False)
+                except Exception:
+                    pass
+
+                gc.collect()
+                time.sleep_ms(200 * attempt)
+                self._ble.active(True)
+                print("BLE controller active on attempt", attempt)
+                return
+
+            except Exception as e:
+                last_err = e
+                try:
+                    print("BLE controller activate failed attempt {}: {}".format(attempt, repr(e)))
+                except Exception:
+                    pass
+                time.sleep_ms(300 * attempt)
+
+        raise last_err
 
     def _set_steering_angle(self, angle):
         if self.steering is None:
@@ -231,15 +267,19 @@ class BleTeleop:
         self._conn_handle = None
         try:
             # MicroPython commonly expects advertising interval in microseconds.
-            self._ble.gap_advertise(100_000, adv_data=self._adv_data)
+            self._ble.gap_advertise(100_000, adv_data=self._adv_data, resp_data=self._resp_data)
             print("BLE advertising as:", BLE_NAME)
         except Exception as first_err:
             try:
-                # Fallback for builds that expect milliseconds.
-                self._ble.gap_advertise(100, adv_data=self._adv_data)
+                self._ble.gap_advertise(100_000, adv_data=self._adv_data)
                 print("BLE advertising as:", BLE_NAME)
             except Exception as second_err:
-                print("BLE advertise failed:", first_err, second_err)
+                try:
+                    # Fallback for builds that expect milliseconds.
+                    self._ble.gap_advertise(100, adv_data=self._adv_data)
+                    print("BLE advertising as:", BLE_NAME)
+                except Exception as third_err:
+                    print("BLE advertise failed:", first_err, second_err, third_err)
 
     def _cancel_oled_msg(self):
         try:
@@ -352,6 +392,7 @@ class BleTeleop:
     def _on_connected(self):
         print("BLE connected")
         self.notify_info("BLE connected")
+        replay_boot_log()
 
         if self._tx_drop_count:
             self.notify_line("WARN TX dropped {}".format(self._tx_drop_count))
@@ -400,6 +441,7 @@ class BleTeleop:
         self._ble_motion_active = False
         self._tx_queue = []
         self._rx_buf = b""
+        self._quiet = False
         self._advertise()
 
     def _irq(self, event, data):
@@ -443,6 +485,8 @@ class BleTeleop:
 
     def _notify(self, text: str):
         if self._conn_handle is None:
+            return
+        if self._quiet and not str(text).startswith(("PONG", "OK ", "PUT_", "ERR")):
             return
         self._queue_notify(text)
 
@@ -611,6 +655,19 @@ class BleTeleop:
                 self._notify("PONG")
                 return
 
+            if line == "QUIET":
+                self._quiet = True
+                self._imu_enabled = False
+                self._motor_fb_enabled = False
+                self._tx_queue = []
+                self._notify("OK QUIET")
+                return
+
+            if line == "VERBOSE":
+                self._quiet = False
+                self._notify("OK VERBOSE")
+                return
+
             if line == "STOP":
                 self._ble_motion_active = True
                 self._stop_drive()
@@ -686,15 +743,35 @@ class BleTeleop:
                 self._begin_upload(line[len("PUT_BEGIN "):].strip())
                 return
 
+            if line == "PU":
+                self._begin_upload("L3VzZXJfbWFpbi5weQ==")
+                return
+
+            if line.startswith("PB "):
+                self._begin_upload(line[3:].strip())
+                return
+
             if line.startswith("PUT_CHUNK "):
                 self._chunk_upload(line[len("PUT_CHUNK "):].strip())
+                return
+
+            if line.startswith("PC "):
+                self._chunk_upload(line[3:].strip())
                 return
 
             if line == "PUT_END":
                 self._end_upload()
                 return
 
+            if line == "PE":
+                self._end_upload()
+                return
+
             if line == "PUT_ABORT":
+                self._abort_upload(silent=False)
+                return
+
+            if line == "PA":
                 self._abort_upload(silent=False)
                 return
 
