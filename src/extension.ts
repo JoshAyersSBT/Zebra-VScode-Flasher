@@ -93,6 +93,7 @@ export function activate(context: vscode.ExtensionContext): void {
   registerCommand(context, 'zebra.refreshRobotDriverCache', refreshRobotDriverCacheCommand, true);
   registerCommand(context, 'zebra.checkDriverCacheUpdates', checkDriverCacheUpdatesCommand, true);
   registerCommand(context, 'zebra.installRobotDrivers', installRobotDriversCommand, true);
+  registerCommand(context, 'zebra.createUserMainFromExample', createUserMainFromExampleCommand, true);
 
   registerCommand(context, 'zebra.detectSerialPort', detectSerialPortCommand, true);
   registerCommand(context, 'zebra.deployProject', deployProjectCommand, true);
@@ -232,6 +233,9 @@ async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> 
       break;
     case 'installRobotDrivers':
       await installRobotDriversCommand();
+      break;
+    case 'createUserMainFromExample':
+      await createUserMainFromExampleCommand();
       break;
     case 'refreshRobotDriverCache':
       await refreshRobotDriverCacheCommand();
@@ -491,6 +495,87 @@ async function installRobotDriversCommand(): Promise<void> {
   const root = requireWorkspaceRoot();
   await ensureRobotDriversInstalled(root, true);
   void vscode.window.showInformationMessage('Robot drivers installed into project.');
+}
+
+interface UserMainExample {
+  label: string;
+  description: string;
+  path: string;
+}
+
+async function createUserMainFromExampleCommand(): Promise<void> {
+  const root = requireWorkspaceRoot();
+  const examples = await listUserMainExamples();
+
+  if (!examples.length) {
+    throw new Error('No bundled user_main.py examples were found.');
+  }
+
+  const pick = await vscode.window.showQuickPick(
+    examples.map(example => ({
+      label: example.label,
+      description: example.description,
+      example,
+    })),
+    {
+      title: 'Create user_main.py from Example',
+      placeHolder: 'Choose a student boilerplate program',
+    },
+  );
+
+  if (!pick) {
+    return;
+  }
+
+  const target = path.join(root, 'user_main.py');
+  if (fs.existsSync(target)) {
+    const choice = await vscode.window.showWarningMessage(
+      'user_main.py already exists. Replace it with the selected example?',
+      { modal: true },
+      'Replace',
+    );
+    if (choice !== 'Replace') {
+      return;
+    }
+  }
+
+  await fs.promises.copyFile(pick.example.path, target);
+  output.appendLine(`Created ${target} from ${path.basename(pick.example.path)}`);
+  await updateProjectContext();
+
+  const document = await vscode.workspace.openTextDocument(target);
+  await vscode.window.showTextDocument(document);
+  void vscode.window.showInformationMessage('Created user_main.py from example. It works with both serial and Bluetooth deploy modes.');
+}
+
+async function listUserMainExamples(): Promise<UserMainExample[]> {
+  const dir = path.join(extensionContext.extensionPath, 'resources', 'examples', 'user-main');
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  const examples: UserMainExample[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.py')) {
+      continue;
+    }
+
+    const examplePath = path.join(dir, entry.name);
+    const text = await fs.promises.readFile(examplePath, 'utf8');
+    const lines = text.split(/\r?\n/);
+    const title = lines.find(line => line.startsWith('# Zebra Example:'))?.replace('# Zebra Example:', '').trim();
+    const description = lines.find(line => line.startsWith('# ') && !line.startsWith('# Zebra Example:'))?.replace(/^#\s*/, '').trim();
+
+    examples.push({
+      label: title || titleCase(path.basename(entry.name, '.py')),
+      description: description || entry.name,
+      path: examplePath,
+    });
+  }
+
+  return examples.sort((a, b) => a.label.localeCompare(b.label));
 }
 
 async function deployProjectCommand(): Promise<void> {
@@ -1783,6 +1868,12 @@ function normalizeRepoUrl(value: string): string {
   return value.trim().replace(/\.git$/i, '').replace(/\/$/i, '').toLowerCase();
 }
 
+function titleCase(value: string): string {
+  return value
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
 function quoteShell(value: string): string {
   if (process.platform === 'win32') return `"${value.replace(/"/g, '\\"')}"`;
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -2118,6 +2209,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
       commandItem('Project Setup', 'zebra.projectSetup', 'gear'),
       commandItem('Welcome', 'zebra.welcome', 'home'),
       commandItem('Initialize Project', 'zebra.initializeProject', 'new-folder'),
+      commandItem('Create user_main.py Example', 'zebra.createUserMainFromExample', 'file-code'),
       commandItem('Setup Toolchain', 'zebra.setupToolchain', 'tools'),
       commandItem('Check Driver Cache Updates', 'zebra.checkDriverCacheUpdates', 'cloud-download'),
       commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),

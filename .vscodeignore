@@ -3,6 +3,7 @@
 .vscode-test-extensions/**
 .vscode-test-user-data/**
 .vscode-test-workspace/**
+.tmp-*/**
 node_modules/**
 test/**
 src/**

@@ -43,6 +43,7 @@ export type ProjectSetupAction =
   | 'installPython'
   | 'initializeProject'
   | 'installRobotDrivers'
+  | 'createUserMainFromExample'
   | 'refreshRobotDriverCache'
   | 'checkDriverCacheUpdates'
   | 'detectSerialPort'
@@ -231,6 +232,7 @@ export class ProjectSetupPanel {
         <p>Create a ZebraBot project, prepare the Python tools, flash MicroPython to an ESP32, then deploy your runtime files to the board.</p>
         <div class="primary-actions">
           <button data-action="initializeProject" data-requires="workspace">Create New Project</button>
+          <button class="secondary" data-action="createUserMainFromExample" data-requires="workspace">Use Example</button>
           <button class="secondary" data-action="openFolder" data-requires="no-workspace">Open Folder</button>
           <button class="secondary" data-action="setupToolchain">Setup Tools</button>
         </div>
@@ -254,6 +256,7 @@ export class ProjectSetupPanel {
         <ul class="problems" id="problems"></ul>
         <div class="actions">
           <button data-action="initializeProject" data-requires="workspace">Initialize Project</button>
+          <button class="secondary" data-action="createUserMainFromExample" data-requires="workspace">Use Example user_main.py</button>
           <button class="secondary" data-action="installRobotDrivers" data-requires="workspace">Install Drivers</button>
           <button class="secondary" data-action="checkDriverCacheUpdates">Check Driver Updates</button>
           <button class="secondary" data-action="openDriverDocs">Driver Docs</button>

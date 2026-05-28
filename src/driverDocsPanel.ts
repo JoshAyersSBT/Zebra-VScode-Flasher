@@ -10,6 +10,11 @@ interface DocPage {
   headings: Array<{ id: string; title: string; level: number }>;
 }
 
+interface RenderContext {
+  docsRoot: string;
+  webview: vscode.Webview;
+}
+
 export class DriverDocsPanel {
   private static currentPanel: DriverDocsPanel | undefined;
 
@@ -22,10 +27,14 @@ export class DriverDocsPanel {
     const column = vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One;
 
     if (DriverDocsPanel.currentPanel) {
-      DriverDocsPanel.currentPanel.panel.reveal(column);
-      DriverDocsPanel.currentPanel.docsRoot = docsRoot;
-      DriverDocsPanel.currentPanel.render();
-      return;
+      if (path.normalize(DriverDocsPanel.currentPanel.docsRoot) !== path.normalize(docsRoot)) {
+        DriverDocsPanel.currentPanel.dispose();
+      } else {
+        DriverDocsPanel.currentPanel.panel.reveal(column);
+        DriverDocsPanel.currentPanel.docsRoot = docsRoot;
+        DriverDocsPanel.currentPanel.render();
+        return;
+      }
     }
 
     const panel = vscode.window.createWebviewPanel(
@@ -35,7 +44,7 @@ export class DriverDocsPanel {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: [extensionUri],
+        localResourceRoots: [extensionUri, vscode.Uri.file(docsRoot)],
       },
     );
 
@@ -51,7 +60,7 @@ export class DriverDocsPanel {
   }
 
   private render(): void {
-    const pages = loadPages(this.docsRoot);
+    const pages = loadPages(this.docsRoot, this.panel.webview);
     const mermaidUri = this.panel.webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'resources', 'vendor', 'mermaid.min.js'));
     this.panel.webview.html = getHtml(this.panel.webview.cspSource, pages, this.docsRoot, mermaidUri);
   }
@@ -65,28 +74,47 @@ export class DriverDocsPanel {
   }
 }
 
-function loadPages(docsRoot: string): DocPage[] {
+function loadPages(docsRoot: string, webview: vscode.Webview): DocPage[] {
   const files = fs.existsSync(docsRoot)
-    ? fs.readdirSync(docsRoot)
-      .filter(file => file.toLowerCase().endsWith('.md'))
+    ? listMarkdownFiles(docsRoot)
       .sort((a, b) => titleRank(a) - titleRank(b) || a.localeCompare(b))
     : [];
+  const context = { docsRoot, webview };
 
   return files.map(file => {
     const markdown = fs.readFileSync(path.join(docsRoot, file), 'utf8');
-    return markdownToPage(file, markdown);
+    return markdownToPage(file, markdown, context);
   });
 }
 
+function listMarkdownFiles(root: string): string[] {
+  const files: string[] = [];
+
+  function visit(dir: string): void {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(full);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+        files.push(path.relative(root, full).replace(/\\/g, '/'));
+      }
+    }
+  }
+
+  visit(root);
+  return files;
+}
+
 function titleRank(file: string): number {
-  const lower = file.toLowerCase();
+  const lower = file.toLowerCase().replace(/\\/g, '/');
   if (lower === 'student-api.md') return 0;
   if (lower === 'sensors.md') return 1;
   return 10;
 }
 
-function markdownToPage(file: string, markdown: string): DocPage {
-  const pageId = slug(file.replace(/\.md$/i, ''));
+function markdownToPage(file: string, markdown: string, context: RenderContext): DocPage {
+  const pageId = pageIdFromFile(file);
   const headings: DocPage['headings'] = [];
   const html: string[] = [];
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
@@ -98,13 +126,13 @@ function markdownToPage(file: string, markdown: string): DocPage {
 
   const flushParagraph = (): void => {
     if (!paragraph.length) return;
-    html.push(`<p>${inlineMarkdown(paragraph.join(' '), pageId)}</p>`);
+    html.push(`<p>${inlineMarkdown(paragraph.join(' '), pageId, file, context)}</p>`);
     paragraph = [];
   };
 
   const flushList = (): void => {
     if (!list.length) return;
-    html.push(`<ul>${list.map(item => `<li>${inlineMarkdown(item, pageId)}</li>`).join('')}</ul>`);
+    html.push(`<ul>${list.map(item => `<li>${inlineMarkdown(item, pageId, file, context)}</li>`).join('')}</ul>`);
     list = [];
   };
 
@@ -145,7 +173,7 @@ function markdownToPage(file: string, markdown: string): DocPage {
       const title = heading[2].trim();
       const id = `${pageId}-${slug(title)}`;
       if (level <= 2) headings.push({ id, title, level });
-      html.push(`<h${level} id="${id}">${inlineMarkdown(title, pageId)}</h${level}>`);
+      html.push(`<h${level} id="${id}">${inlineMarkdown(title, pageId, file, context)}</h${level}>`);
       continue;
     }
 
@@ -169,7 +197,7 @@ function markdownToPage(file: string, markdown: string): DocPage {
   flushParagraph();
   flushList();
 
-  const title = headings[0]?.title || file.replace(/\.md$/i, '').replace(/[-_]/g, ' ');
+  const title = headings[0]?.title || path.basename(file).replace(/\.md$/i, '').replace(/[-_]/g, ' ');
   return { id: pageId, title, file, html: html.join('\n'), headings };
 }
 
@@ -199,7 +227,7 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string, mermaidU
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'nonce-${nonce}';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Zebra Driver Docs</title>
   <style>
@@ -231,6 +259,9 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string, mermaidU
     h2 { margin: 34px 0 10px; font-size: 22px; line-height: 1.25; }
     h3 { margin: 24px 0 8px; font-size: 17px; }
     p { margin: 0 0 14px; }
+    figure { margin: 18px 0 24px; }
+    figcaption { color: var(--muted); font-size: 12px; margin-top: 6px; text-align: center; }
+    .doc-image { display: block; max-width: 100%; height: auto; margin: 0 auto; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--side), transparent 38%); }
     ul { margin: 0 0 18px; padding-left: 22px; }
     li { margin: 4px 0; }
     a { color: var(--link); text-decoration: none; }
@@ -298,13 +329,18 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string, mermaidU
       });
     });
     document.addEventListener('click', event => {
-      const link = event.target.closest('a[href^="#doc-"]');
+      const link = event.target.closest('a[data-doc-page]');
       if (!link) return;
-      const page = link.getAttribute('href').slice(5);
+      const page = link.dataset.docPage;
+      const heading = link.dataset.docHeading || '';
       if (!pages.some(p => p.dataset.page === page)) return;
       event.preventDefault();
       setPage(page);
-      document.documentElement.scrollTop = 0;
+      if (heading) {
+        document.getElementById(heading)?.scrollIntoView();
+      } else {
+        document.documentElement.scrollTop = 0;
+      }
     });
     function setPage(page) {
       buttons.forEach(b => b.classList.toggle('active', b.dataset.page === page));
@@ -391,17 +427,75 @@ function getHtml(cspSource: string, pages: DocPage[], docsRoot: string, mermaidU
 </html>`;
 }
 
-function inlineMarkdown(value: string, pageId: string): string {
+function inlineMarkdown(value: string, pageId: string, file: string, context: RenderContext): string {
   return escapeHtml(value)
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt: string, href: string) => {
+      const src = resolveAssetUri(href, file, context);
+      if (!src) {
+        return `<span class="empty">${alt || href}</span>`;
+      }
+      const caption = alt ? `<figcaption>${alt}</figcaption>` : '';
+      return `<figure><img class="doc-image" src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" />${caption}</figure>`;
+    })
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, text: string, href: string) => {
-      const target = href.endsWith('.md') ? `#doc-${pageIdFromHref(href)}` : href;
-      return `<a href="${escapeAttr(target)}">${text}</a>`;
+      const target = resolveDocTarget(href, pageId, file);
+      return target
+        ? `<a href="#doc-${escapeAttr(target.page)}" data-doc-page="${escapeAttr(target.page)}"${target.heading ? ` data-doc-heading="${escapeAttr(target.heading)}"` : ''}>${text}</a>`
+        : `<a href="${escapeAttr(href)}">${text}</a>`;
     });
 }
 
-function pageIdFromHref(href: string): string {
-  return slug(path.basename(href).replace(/\.md$/i, ''));
+function resolveAssetUri(href: string, currentFile: string, context: RenderContext): string | undefined {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return undefined;
+
+  const [rawPath, rawHash = ''] = href.split('#');
+  if (!rawPath) return undefined;
+
+  const resolved = resolveDocsRelativePath(rawPath, currentFile);
+  if (!resolved) return undefined;
+
+  const localPath = path.resolve(context.docsRoot, ...resolved.split('/'));
+  const docsRoot = path.resolve(context.docsRoot);
+  if (localPath !== docsRoot && !localPath.startsWith(docsRoot + path.sep)) {
+    return undefined;
+  }
+  if (!fs.existsSync(localPath)) {
+    return undefined;
+  }
+
+  const uri = context.webview.asWebviewUri(vscode.Uri.file(localPath)).toString();
+  return rawHash ? `${uri}#${encodeURIComponent(rawHash)}` : uri;
+}
+
+function resolveDocTarget(href: string, currentPageId: string, currentFile: string): { page: string; heading: string } | undefined {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return undefined;
+
+  const [rawPath, rawHash = ''] = href.split('#');
+  const hash = decodeURIComponent(rawHash).trim();
+  if (!rawPath) {
+    return { page: currentPageId, heading: hash ? `${currentPageId}-${slug(hash)}` : '' };
+  }
+
+  if (!rawPath.toLowerCase().endsWith('.md')) return undefined;
+
+  const resolved = resolveDocsRelativePath(rawPath, currentFile);
+  if (!resolved) return undefined;
+
+  const page = pageIdFromFile(resolved);
+  return { page, heading: hash ? `${page}-${slug(hash)}` : '' };
+}
+
+function resolveDocsRelativePath(hrefPath: string, currentFile: string): string | undefined {
+  const decoded = decodeURIComponent(hrefPath).replace(/\\/g, '/');
+  const baseDir = path.posix.dirname(currentFile.replace(/\\/g, '/'));
+  const resolved = path.posix.normalize(path.posix.join(baseDir === '.' ? '' : baseDir, decoded));
+  if (resolved.startsWith('../') || path.posix.isAbsolute(resolved)) return undefined;
+  return resolved;
+}
+
+function pageIdFromFile(file: string): string {
+  return slug(file.replace(/\\/g, '/').replace(/\.md$/i, ''));
 }
 
 function slug(value: string): string {

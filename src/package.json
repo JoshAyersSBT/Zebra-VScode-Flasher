@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"
@@ -23,6 +23,7 @@
     "onCommand:zebra.refreshRobotDriverCache",
     "onCommand:zebra.checkDriverCacheUpdates",
     "onCommand:zebra.installRobotDrivers",
+    "onCommand:zebra.createUserMainFromExample",
     "onCommand:zebra.detectSerialPort",
     "onCommand:zebra.deployProject",
     "onCommand:zebra.flashFirmware",
@@ -62,6 +63,7 @@
       { "command": "zebra.refreshRobotDriverCache", "title": "Zebra: Refresh Robot Driver Cache", "icon": "$(sync)" },
       { "command": "zebra.checkDriverCacheUpdates", "title": "Zebra: Check Robot Driver Cache Updates", "icon": "$(cloud-download)" },
       { "command": "zebra.installRobotDrivers", "title": "Zebra: Install Robot Drivers into Project", "icon": "$(file-submodule)" },
+      { "command": "zebra.createUserMainFromExample", "title": "Zebra: Create user_main.py from Example", "icon": "$(file-code)" },
       { "command": "zebra.detectSerialPort", "title": "Zebra: Detect ESP32 Serial Port", "icon": "$(plug)" },
       { "command": "zebra.deployProject", "title": "Zebra: Deploy Project to ESP32", "icon": "$(cloud-upload)" },
       { "command": "zebra.flashFirmware", "title": "Zebra: Flash MicroPython Firmware", "icon": "$(zap)" },
