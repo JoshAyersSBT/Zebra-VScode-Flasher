@@ -57,6 +57,11 @@ The extension creates an isolated Python virtual environment in VS Code global e
 - `esptool`
 - `bleak`
 
+It also verifies Git, which is required for robot driver cache updates.
+On Windows, `Zebra: Setup Toolchain` installs Git with `winget` when possible.
+On macOS, it uses Homebrew when available. On Linux, it opens a terminal with
+the appropriate package-manager install command.
+
 If Python 3 is not already available, `Zebra: Setup Toolchain` and `Zebra: Initialize Project` attempt a platform-specific install first:
 
 - Windows: installs Python 3.12 with `winget` when available.

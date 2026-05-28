@@ -301,6 +301,9 @@ async function setupToolchainCommand(): Promise<string> {
 
       output.appendLine(`Using Python: ${python.display}`);
 
+      progress.report({ message: 'Checking Git for driver updates...' });
+      await ensureGitCommand(progress);
+
       if (!fs.existsSync(toolPython)) {
         progress.report({ message: 'Creating Python virtual environment...' });
         await runCommand(python.command, [...python.argsPrefix, '-m', 'venv', venvDir]);
@@ -1077,6 +1080,8 @@ async function hasDeployableDriverFiles(root: string): Promise<boolean> {
 }
 
 async function refreshRobotDriverCache(): Promise<void> {
+  await ensureGitCommand();
+
   const cacheDir = getDriverCacheDir();
   const tmpParent = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'zebra-driver-cache-'));
   const tmpRepo = path.join(tmpParent, 'repo');
@@ -1650,6 +1655,162 @@ async function installPython3OnLinux(
   return false;
 }
 
+async function ensureGitCommand(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<void> {
+  if (await canRunCommand('git', ['--version'])) {
+    output.appendLine('Git is ready for Zebra driver updates.');
+    return;
+  }
+
+  progress?.report({ message: 'Git was not found. Preparing installer...' });
+  output.appendLine('Git was not found. Attempting platform installer.');
+
+  const installed = await installGitIfPossible(progress);
+  if (installed && await canResolveGitAfterInstaller()) {
+    output.appendLine('Git install verified.');
+    return;
+  }
+
+  throw new Error(getGitInstallInstructions());
+}
+
+async function installGitIfPossible(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  if (process.platform === 'darwin') {
+    return installGitOnMac(progress);
+  }
+
+  if (process.platform === 'win32') {
+    return installGitOnWindows(progress);
+  }
+
+  return installGitOnLinux(progress);
+}
+
+async function installGitOnWindows(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  if (await canRunCommand('winget', ['--version'])) {
+    progress?.report({ message: 'Installing Git with winget...' });
+    output.appendLine('Using winget to install Git.');
+    await runCommand('winget', [
+      'install',
+      '-e',
+      '--id',
+      'Git.Git',
+      '--accept-package-agreements',
+      '--accept-source-agreements',
+    ], true);
+    return true;
+  }
+
+  if (await canRunCommand('powershell.exe', [
+    '-NoProfile',
+    '-Command',
+    'if (Get-Command winget -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }',
+  ])) {
+    progress?.report({ message: 'Installing Git with winget...' });
+    output.appendLine('Using winget through PowerShell to install Git.');
+    await runCommand('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      'winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements',
+    ], true);
+    return true;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    'Git was not found and winget is unavailable. Zebra can open the Git for Windows download page.',
+    'Open Git Downloads',
+    'Cancel',
+  );
+
+  if (choice === 'Open Git Downloads') {
+    await vscode.env.openExternal(vscode.Uri.parse('https://git-scm.com/download/win'));
+  }
+
+  return false;
+}
+
+async function installGitOnMac(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  const brew = await resolveBrewCommand();
+
+  if (brew) {
+    progress?.report({ message: 'Installing Git with Homebrew...' });
+    output.appendLine(`Using Homebrew to install Git: ${brew}`);
+    await runCommand(brew, ['install', 'git']);
+    return true;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    'Git was not found and Homebrew is not installed. Zebra can open the Git download page.',
+    'Open Git Downloads',
+    'Cancel',
+  );
+
+  if (choice === 'Open Git Downloads') {
+    await vscode.env.openExternal(vscode.Uri.parse('https://git-scm.com/download/mac'));
+  }
+
+  return false;
+}
+
+async function installGitOnLinux(
+  progress?: vscode.Progress<{ message?: string; increment?: number }>,
+): Promise<boolean> {
+  const apt = await firstRunnableCommand(['apt-get', '/usr/bin/apt-get'], ['--version']);
+  if (apt) {
+    const terminal = vscode.window.createTerminal('Zebra Git Install');
+    terminal.show();
+    terminal.sendText('sudo apt-get update && sudo apt-get install -y git', true);
+    progress?.report({ message: 'Opened a terminal for apt Git install. Re-run Setup Toolchain when it finishes.' });
+    output.appendLine('Opened terminal for Linux Git install. Re-run Setup Toolchain after apt finishes.');
+    return false;
+  }
+
+  const dnf = await firstRunnableCommand(['dnf', '/usr/bin/dnf'], ['--version']);
+  if (dnf) {
+    const terminal = vscode.window.createTerminal('Zebra Git Install');
+    terminal.show();
+    terminal.sendText('sudo dnf install -y git', true);
+    progress?.report({ message: 'Opened a terminal for dnf Git install. Re-run Setup Toolchain when it finishes.' });
+    output.appendLine('Opened terminal for Linux Git install with dnf. Re-run Setup Toolchain after dnf finishes.');
+    return false;
+  }
+
+  const pacman = await firstRunnableCommand(['pacman', '/usr/bin/pacman'], ['--version']);
+  if (pacman) {
+    const terminal = vscode.window.createTerminal('Zebra Git Install');
+    terminal.show();
+    terminal.sendText('sudo pacman -Sy --needed git', true);
+    progress?.report({ message: 'Opened a terminal for pacman Git install. Re-run Setup Toolchain when it finishes.' });
+    output.appendLine('Opened terminal for Linux Git install with pacman. Re-run Setup Toolchain after pacman finishes.');
+    return false;
+  }
+
+  return false;
+}
+
+async function canResolveGitAfterInstaller(): Promise<boolean> {
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    if (await canRunCommand('git', ['--version'])) {
+      return true;
+    }
+
+    output.appendLine(`Git not visible yet after installer; retry ${attempt}/6...`);
+    await sleep(1000);
+  }
+
+  output.appendLine('Git installer finished, but Git was not found in known locations.');
+  return false;
+}
+
 async function resolveBrewCommand(): Promise<string | undefined> {
   return firstRunnableCommand(['/opt/homebrew/bin/brew', '/usr/local/bin/brew', 'brew'], ['--version']);
 }
@@ -1673,6 +1834,18 @@ function getPythonInstallInstructions(): string {
   }
 
   return 'Python 3 could not be installed automatically. Install python3, python3-venv, and python3-pip with your distro package manager, then run Zebra: Setup Toolchain again.';
+}
+
+function getGitInstallInstructions(): string {
+  if (process.platform === 'darwin') {
+    return 'Git could not be installed automatically. Install Git from https://git-scm.com/download/mac or install Homebrew and run: brew install git. Then restart VS Code and run Zebra: Setup Toolchain again.';
+  }
+
+  if (process.platform === 'win32') {
+    return 'Git could not be installed automatically. Install Git for Windows from https://git-scm.com/download/win or with winget install -e --id Git.Git, then restart VS Code and run Zebra: Setup Toolchain again.';
+  }
+
+  return 'Git could not be installed automatically. Install git with your distro package manager, then run Zebra: Setup Toolchain again.';
 }
 
 function getPythonCandidates(): PythonCommand[] {
@@ -1774,13 +1947,35 @@ function canRunCommand(command: string, args: string[]): Promise<boolean> {
 function getProcessEnvForTools(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
 
-  if (process.platform !== 'win32') {
-    const extraPaths = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-    const currentPath = env.PATH || '';
-    env.PATH = [...extraPaths, currentPath].filter(Boolean).join(path.delimiter);
-  }
+  const currentPath = env.PATH || env.Path || '';
+  const extraPaths = process.platform === 'win32'
+    ? getWindowsToolSearchPaths()
+    : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+
+  const pathValue = [...extraPaths, currentPath].filter(Boolean).join(path.delimiter);
+  env.PATH = pathValue;
+  env.Path = pathValue;
 
   return env;
+}
+
+function getWindowsToolSearchPaths(): string[] {
+  const roots = [
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Git') : '',
+    process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'Git') : '',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Git') : '',
+  ].filter(Boolean);
+
+  const paths: string[] = [];
+  for (const root of roots) {
+    for (const child of ['cmd', 'bin']) {
+      const candidate = path.join(root, child);
+      if (fs.existsSync(candidate)) {
+        paths.push(candidate);
+      }
+    }
+  }
+  return paths;
 }
 
 function getVenvDir(): string {
@@ -2097,7 +2292,7 @@ function runCommand(command: string, args: string[], ignoreFailure = false): Pro
 
     child.on('error', (err: Error) => {
       if (ignoreFailure) resolve(stdout.trim());
-      else reject(err);
+      else reject(commandError(command, args, err));
     });
 
     child.on('close', (code: number | null) => {
@@ -2108,6 +2303,20 @@ function runCommand(command: string, args: string[], ignoreFailure = false): Pro
       resolve(stdout.trim());
     });
   });
+}
+
+function commandError(command: string, args: string[], err: Error): Error {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') {
+    if (command.toLowerCase() === 'git' || command.toLowerCase() === 'git.exe') {
+      return new Error(
+        'Git was not found while running Zebra driver cache command. Install Git for Windows, make sure "git" is on PATH, then restart VS Code. ' +
+        `Original command: git ${args.join(' ')}`
+      );
+    }
+    return new Error(`Command not found: ${command}. Original command: ${command} ${args.join(' ')}`);
+  }
+  return err;
 }
 
 function runCommandWithInput(command: string, args: string[], input: string, logLine: string, ignoreFailure = false): Promise<string> {

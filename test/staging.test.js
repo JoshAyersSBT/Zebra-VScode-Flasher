@@ -23,6 +23,53 @@ function rels(root) {
   return iterDeployFiles(root).map(file => file.rel);
 }
 
+function collectPyFiles(root) {
+  const files = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectPyFiles(full));
+    } else if (entry.isFile() && entry.name.endsWith('.py')) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+function collectRobotImports(source) {
+  const modules = new Set();
+  const patterns = [
+    /^\s*from\s+robot\.([A-Za-z_][\w.]*)\s+import\s+/gm,
+    /^\s*import\s+robot\.([A-Za-z_][\w.]*)/gm,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      modules.add(match[1].split('.')[0]);
+    }
+  }
+
+  return [...modules].sort();
+}
+
+test('bundled runtime includes robot modules imported by runtime files', () => {
+  const runtimeRoot = path.resolve(__dirname, '..', 'resources', 'runtime');
+  const robotRoot = path.join(runtimeRoot, 'robot');
+  const missing = [];
+
+  for (const file of collectPyFiles(runtimeRoot)) {
+    const source = readFile(file);
+    for (const moduleName of collectRobotImports(source)) {
+      const modulePath = path.join(robotRoot, `${moduleName}.py`);
+      if (!fs.existsSync(modulePath)) {
+        missing.push(`${path.relative(runtimeRoot, file)} imports robot.${moduleName}`);
+      }
+    }
+  }
+
+  assert.deepEqual(missing, []);
+});
+
 test('buildStagedProject stages runtime and project entrypoint', () => {
   const root = makeTempProject();
   const projectRoot = path.join(root, 'project');
