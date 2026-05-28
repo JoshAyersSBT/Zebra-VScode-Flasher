@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"
@@ -30,7 +30,8 @@
     "onCommand:zebra.flashFirmware",
     "onCommand:zebra.resetDevice",
     "onCommand:zebra.openSerialMonitor",
-    "onCommand:zebra.openDriverHelp"
+    "onCommand:zebra.openDriverHelp",
+    "onCommand:zebra.openDriverDocs"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -146,6 +147,11 @@
         "command": "zebra.openDriverHelp",
         "title": "Zebra: Open USB UART Driver Help",
         "icon": "$(link-external)"
+      },
+      {
+        "command": "zebra.openDriverDocs",
+        "title": "Zebra: Open Robot Driver Docs",
+        "icon": "$(book)"
       }
     ],
     "menus": {
@@ -231,7 +237,7 @@
         "zebra.runtimePath": {
           "type": "string",
           "default": "",
-          "description": "Optional path to runtime main.py and robot/ folder. Defaults to extension resources/runtime, or zebra.json runtimePath."
+          "description": "Optional path to runtime main.py and robot/ folder. Defaults to zebra.json runtimePath, then the Zebra driver repo cache, then extension resources/runtime."
         },
         "zebra.driverCachePath": {
           "type": "string",
@@ -240,7 +246,7 @@
         },
         "zebra.driverRepoUrl": {
           "type": "string",
-          "default": "https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git",
+          "default": "https://github.com/JoshAyersSBT/ZbotDriver.git",
           "description": "Repository used to populate the local Zebra robot driver cache when robot/ is not already cached."
         },
         "zebra.driverRepoBranch": {

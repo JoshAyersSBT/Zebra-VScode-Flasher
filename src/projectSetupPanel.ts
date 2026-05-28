@@ -47,6 +47,7 @@ export type ProjectSetupAction =
   | 'detectSerialPort'
   | 'checkProject'
   | 'openDriverHelp'
+  | 'openDriverDocs'
   | 'deployProject'
   | 'flashFirmware'
   | 'openSerialMonitor'
@@ -253,6 +254,7 @@ export class ProjectSetupPanel {
         <div class="actions">
           <button data-action="initializeProject" data-requires="workspace">Initialize Project</button>
           <button class="secondary" data-action="installRobotDrivers" data-requires="workspace">Install Drivers</button>
+          <button class="secondary" data-action="openDriverDocs">Driver Docs</button>
           <button class="secondary" data-action="checkProject" data-requires="project-toolchain">Check Python</button>
         </div>
       </section>

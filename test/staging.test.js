@@ -89,6 +89,29 @@ test('buildStagedProject skips local robot drivers, caches, and teleop root file
   assert.equal(fs.existsSync(path.join(stage, 'robot', 'old_driver.py')), false);
 });
 
+test('buildStagedProject does not stage driver documentation', () => {
+  const root = makeTempProject();
+  const projectRoot = path.join(root, 'project');
+  const runtimeRoot = path.join(root, 'runtime');
+
+  writeFile(path.join(runtimeRoot, 'main.py'), 'runtime main');
+  writeFile(path.join(runtimeRoot, 'robot', 'drive.py'), 'runtime drive');
+  writeFile(path.join(runtimeRoot, 'docs', 'student-api.md'), '# docs stay local');
+  writeFile(path.join(projectRoot, 'main.py'), 'student main');
+  writeFile(path.join(projectRoot, 'docs', 'notes.md'), '# project docs stay local');
+
+  const stage = buildStagedProject(projectRoot, runtimeRoot);
+
+  assert.deepEqual(rels(stage), [
+    'main.py',
+    'robot/__init__.py',
+    'robot/drive.py',
+    'user_main.py',
+  ]);
+  assert.equal(fs.existsSync(path.join(stage, 'docs', 'student-api.md')), false);
+  assert.equal(fs.existsSync(path.join(stage, 'docs', 'notes.md')), false);
+});
+
 test('buildStagedProject reports missing runtime and entrypoint clearly', () => {
   const root = makeTempProject();
   const projectRoot = path.join(root, 'project');

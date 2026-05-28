@@ -149,9 +149,15 @@ Useful commands:
 
 - `Zebra: Refresh Robot Driver Cache`
 - `Zebra: Install Robot Drivers into Project`
+- `Zebra: Open Robot Driver Docs`
 
 Default driver repo:
 
 ```txt
-https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git
+https://github.com/JoshAyersSBT/ZbotDriver.git
 ```
+
+The extension reads driver documentation from the cached driver repo `docs/`
+folder, with bundled fallback copies under `resources/driver-docs`. Documentation
+files are shown in a read-only VS Code tab and are not included in staged flash
+or deploy files.

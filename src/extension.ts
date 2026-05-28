@@ -17,9 +17,10 @@ import {
   ProjectSetupPanel,
   ProjectSetupState,
 } from './projectSetupPanel';
+import { DriverDocsPanel } from './driverDocsPanel';
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool', 'bleak'];
-const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git';
+const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/ZbotDriver.git';
 const DEFAULT_MICROPYTHON_FIRMWARE_URL = 'https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin';
 const DEFAULT_NATIVE_BUILD_ROOT = '~/zbot-fw';
 const DEFAULT_WSL_FLASHER_USERNAME = 'flasher';
@@ -85,6 +86,7 @@ export function activate(context: vscode.ExtensionContext): void {
   registerCommand(context, 'zebra.resetDevice', resetDeviceCommand, true);
   registerCommand(context, 'zebra.openSerialMonitor', openSerialMonitorCommand, true);
   registerCommand(context, 'zebra.openDriverHelp', openDriverHelp, false);
+  registerCommand(context, 'zebra.openDriverDocs', openDriverDocsCommand, false);
 
   void updateProjectContext();
   vscode.workspace.onDidChangeWorkspaceFolders(() => void updateProjectContext(), null, context.subscriptions);
@@ -237,6 +239,9 @@ async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> 
       break;
     case 'openDriverHelp':
       await openDriverHelp();
+      break;
+    case 'openDriverDocs':
+      await openDriverDocsCommand();
       break;
     case 'setSerialDeploy':
       await vscode.workspace.getConfiguration('zebra').update('deployTransport', 'serial', vscode.ConfigurationTarget.Workspace);
@@ -419,6 +424,29 @@ async function refreshRobotDriverCacheCommand(): Promise<void> {
     async () => refreshRobotDriverCache(),
   );
   void vscode.window.showInformationMessage('Robot driver cache refreshed.');
+}
+
+async function openDriverDocsCommand(): Promise<void> {
+  const docsRoot = await getDriverDocsRoot();
+  await DriverDocsPanel.show(extensionContext.extensionUri, docsRoot);
+}
+
+async function getDriverDocsRoot(): Promise<string> {
+  const cacheDocs = path.join(getDriverCacheDir(), 'docs');
+  if (fs.existsSync(cacheDocs)) {
+    return cacheDocs;
+  }
+
+  try {
+    await refreshRobotDriverCache();
+    if (fs.existsSync(cacheDocs)) {
+      return cacheDocs;
+    }
+  } catch (err: unknown) {
+    output.appendLine(`Driver docs repo fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return path.join(extensionContext.extensionPath, 'resources', 'driver-docs');
 }
 
 async function installRobotDriversCommand(): Promise<void> {
@@ -860,15 +888,16 @@ function inspectProject(root: string): ProjectStatus {
   const hasUserMain = fs.existsSync(path.join(root, 'user_main.py'));
   const hasRobotDir = fs.existsSync(path.join(root, 'robot'));
   const hasZebraJson = fs.existsSync(path.join(root, 'zebra.json'));
-  const hasRuntimeMain = fs.existsSync(getBundledRuntimeMain());
-  const hasRuntimeRobot = fs.existsSync(getBundledRobotDir());
+  const runtimeRoot = getResolvedRuntimeRoot(root);
+  const hasRuntimeMain = fs.existsSync(path.join(runtimeRoot, 'main.py'));
+  const hasRuntimeRobot = fs.existsSync(path.join(runtimeRoot, 'robot'));
 
   const problems: string[] = [];
   if (!hasMain && !hasUserMain) problems.push('Missing main.py or user_main.py.');
   if (!hasRobotDir) problems.push('Missing project robot/ driver directory.');
   if (!hasZebraJson) problems.push('Missing zebra.json project config.');
-  if (!hasRuntimeMain) problems.push(`Missing bundled runtime main.py at ${getBundledRuntimeMain()}.`);
-  if (!hasRuntimeRobot) problems.push(`Missing bundled runtime robot/ at ${getBundledRobotDir()}.`);
+  if (!hasRuntimeMain) problems.push(`Missing runtime main.py at ${path.join(runtimeRoot, 'main.py')}.`);
+  if (!hasRuntimeRobot) problems.push(`Missing runtime robot/ at ${path.join(runtimeRoot, 'robot')}.`);
 
   return { root, valid: problems.length === 0, hasMain, hasUserMain, hasRobotDir, hasZebraJson, hasRuntimeMain, hasRuntimeRobot, problems };
 }
@@ -894,16 +923,11 @@ async function ensureRobotDriversInstalled(projectRoot: string, force = false): 
 }
 
 async function getRobotDriverSource(): Promise<string> {
-  const bundled = getBundledRobotDir();
-  if (fs.existsSync(bundled)) {
-    return bundled;
-  }
-
   const configuredCache = getWorkspaceConfig<string>('driverCachePath', '');
   if (configuredCache) {
     const robot = path.join(configuredCache, 'robot');
     if (fs.existsSync(robot)) return robot;
-    if (fs.existsSync(configuredCache)) return configuredCache;
+    if (fs.existsSync(configuredCache) && await hasDeployableDriverFiles(configuredCache)) return configuredCache;
   }
 
   const cacheRobot = path.join(getDriverCacheDir(), 'robot');
@@ -916,7 +940,17 @@ async function getRobotDriverSource(): Promise<string> {
     return cacheRobot;
   }
 
+  const bundled = getBundledRobotDir();
+  if (fs.existsSync(bundled)) {
+    return bundled;
+  }
+
   return '';
+}
+
+async function hasDeployableDriverFiles(root: string): Promise<boolean> {
+  const files = await walk(root);
+  return files.some(file => DEPLOY_SUFFIXES.has(path.extname(file).toLowerCase()));
 }
 
 async function refreshRobotDriverCache(): Promise<void> {
@@ -933,8 +967,9 @@ async function refreshRobotDriverCache(): Promise<void> {
 
 async function buildStagedProject(projectRoot: string): Promise<string> {
   const stage = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'zbot_stage_'));
-  const runtimeMain = getRuntimeMainForProject(projectRoot);
-  const runtimeRobot = getRuntimeRobotForProject(projectRoot);
+  const runtimeRoot = await resolveRuntimeRootForProject(projectRoot);
+  const runtimeMain = path.join(runtimeRoot, 'main.py');
+  const runtimeRobot = path.join(runtimeRoot, 'robot');
   const userEntry = fs.existsSync(path.join(projectRoot, 'user_main.py')) ? path.join(projectRoot, 'user_main.py') : path.join(projectRoot, 'main.py');
 
   if (!fs.existsSync(runtimeMain)) throw new Error(`Runtime main.py not found: ${runtimeMain}`);
@@ -954,19 +989,52 @@ async function buildStagedProject(projectRoot: string): Promise<string> {
 }
 
 function getRuntimeMainForProject(projectRoot: string): string {
-  const configuredRuntime = getWorkspaceConfig<string>('runtimePath', '');
-  if (configuredRuntime) return path.join(configuredRuntime, 'main.py');
-  const jsonRuntime = readZebraJsonRuntimePath(projectRoot);
-  if (jsonRuntime) return path.join(jsonRuntime, 'main.py');
-  return getBundledRuntimeMain();
+  return path.join(getResolvedRuntimeRoot(projectRoot), 'main.py');
 }
 
 function getRuntimeRobotForProject(projectRoot: string): string {
+  return path.join(getResolvedRuntimeRoot(projectRoot), 'robot');
+}
+
+async function resolveRuntimeRootForProject(projectRoot: string): Promise<string> {
+  let runtimeRoot = getResolvedRuntimeRoot(projectRoot);
+  if (runtimeRootHasRuntime(runtimeRoot)) {
+    return runtimeRoot;
+  }
+
   const configuredRuntime = getWorkspaceConfig<string>('runtimePath', '');
-  if (configuredRuntime) return path.join(configuredRuntime, 'robot');
   const jsonRuntime = readZebraJsonRuntimePath(projectRoot);
-  if (jsonRuntime) return path.join(jsonRuntime, 'robot');
-  return getBundledRobotDir();
+  if (!configuredRuntime && !jsonRuntime) {
+    try {
+      await refreshRobotDriverCache();
+      runtimeRoot = getResolvedRuntimeRoot(projectRoot);
+      if (runtimeRootHasRuntime(runtimeRoot)) {
+        return runtimeRoot;
+      }
+    } catch (err: unknown) {
+      output.appendLine(`Driver repo fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return runtimeRoot;
+}
+
+function getResolvedRuntimeRoot(projectRoot: string): string {
+  const configuredRuntime = getWorkspaceConfig<string>('runtimePath', '');
+  if (configuredRuntime) return configuredRuntime;
+  const jsonRuntime = readZebraJsonRuntimePath(projectRoot);
+  if (jsonRuntime) return jsonRuntime;
+
+  const cacheDir = getDriverCacheDir();
+  if (runtimeRootHasRuntime(cacheDir)) {
+    return cacheDir;
+  }
+
+  return getBundledRuntimeDir();
+}
+
+function runtimeRootHasRuntime(root: string): boolean {
+  return fs.existsSync(path.join(root, 'main.py')) && fs.existsSync(path.join(root, 'robot'));
 }
 
 function readZebraJsonRuntimePath(projectRoot: string): string {
@@ -1900,6 +1968,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
       commandItem('Deploy Project / User Program', 'zebra.deployProject', 'cloud-upload'),
       commandItem('Serial Monitor', 'zebra.openSerialMonitor', 'terminal'),
       commandItem('Flash Firmware', 'zebra.flashFirmware', 'zap'),
+      commandItem('Robot Driver Docs', 'zebra.openDriverDocs', 'book'),
     ];
 
     return Promise.resolve(items);

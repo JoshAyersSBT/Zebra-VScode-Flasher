@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { runCommand } from './process';
 
-const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/Zebra_SOL_Flasher.git';
+const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/ZbotDriver.git';
 
 export function getGlobalDriverCacheDir(context: vscode.ExtensionContext): string {
   return path.join(context.globalStorageUri.fsPath, 'zbot-driver-cache');
