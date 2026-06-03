@@ -30,7 +30,8 @@
     "onCommand:zebra.resetDevice",
     "onCommand:zebra.openSerialMonitor",
     "onCommand:zebra.openDriverHelp",
-    "onCommand:zebra.openDriverDocs"
+    "onCommand:zebra.openDriverDocs",
+    "onCommand:zebra.openSimulator"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -70,7 +71,8 @@
       { "command": "zebra.resetDevice", "title": "Zebra: Reset Device", "icon": "$(debug-restart)" },
       { "command": "zebra.openSerialMonitor", "title": "Zebra: Open Serial Monitor", "icon": "$(terminal)" },
       { "command": "zebra.openDriverHelp", "title": "Zebra: Open USB UART Driver Help", "icon": "$(link-external)" },
-      { "command": "zebra.openDriverDocs", "title": "Zebra: Open Robot Driver Docs", "icon": "$(book)" }
+      { "command": "zebra.openDriverDocs", "title": "Zebra: Open Robot Driver Docs", "icon": "$(book)" },
+      { "command": "zebra.openSimulator", "title": "Zebra: Open Robot Simulator", "icon": "$(debug-start)" }
     ],
     "menus": {
       "view/title": [
@@ -111,6 +113,11 @@
         {
           "command": "zebra.projectSetup",
           "group": "zebra@3"
+        },
+        {
+          "command": "zebra.openSimulator",
+          "when": "zebra.projectActive",
+          "group": "zebra@4"
         }
       ]
     },

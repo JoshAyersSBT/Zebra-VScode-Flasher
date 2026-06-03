@@ -29,9 +29,11 @@ export interface ProjectSetupState {
     }>;
   };
   deploy: {
-    transport: 'serial' | 'ble';
+    transport: 'serial' | 'ble' | 'wifi';
     bleName: string;
     bleChunkSize: number;
+    wifiUrl: string;
+    wifiTimeout: number;
   };
 }
 
@@ -54,7 +56,8 @@ export type ProjectSetupAction =
   | 'flashFirmware'
   | 'openSerialMonitor'
   | 'setSerialDeploy'
-  | 'setBleDeploy';
+  | 'setBleDeploy'
+  | 'setWifiDeploy';
 
 export class ProjectSetupPanel {
   private static currentPanel: ProjectSetupPanel | undefined;
@@ -243,7 +246,7 @@ export class ProjectSetupPanel {
           <div class="step">Create or open a Zebra project so <code>zebra.json</code>, <code>main.py</code>, and <code>robot/</code> are in place.</div>
           <div class="step">Run toolchain setup, then install USB UART drivers if your board is not detected.</div>
           <div class="step">Put the ESP32 into bootloader mode, choose Flash Firmware, and write MicroPython to the board.</div>
-          <div class="step">Use serial deploy once to install or refresh the runtime, then switch to Bluetooth when you only need to update <code>user_main.py</code>.</div>
+          <div class="step">Use serial deploy once to install or refresh the runtime, then switch to Wi-Fi or Bluetooth when you only need to update <code>user_main.py</code>.</div>
         </div>
       </section>
     </div>
@@ -300,9 +303,14 @@ export class ProjectSetupPanel {
             <strong>Bluetooth install</strong>
             Uploads only <code>user_main.py</code> to the board named <code id="bleNameInline">ZebraBot</code>. Use after the board already has the Zebra BLE runtime.
           </div>
+          <div id="wifiMode" class="mode">
+            <strong>Wi-Fi install</strong>
+            Uploads only <code>user_main.py</code> to the Zebra Wi-Fi code server at <code id="wifiUrlInline">http://192.168.4.1:8080</code>.
+          </div>
         </div>
-        <p class="hint">Bluetooth upload uses <code>zebra.deployTransport</code>, <code>zebra.bleName</code>, and <code>zebra.bleChunkSize</code>.</p>
+        <p class="hint">User program uploads use <code>zebra.deployTransport</code>. Wi-Fi also uses <code>zebra.wifiUrl</code>, <code>zebra.wifiToken</code>, and <code>zebra.wifiTimeout</code>.</p>
         <div class="actions">
+          <button data-action="setWifiDeploy" data-requires="workspace">Use Wi-Fi Upload</button>
           <button data-action="setBleDeploy" data-requires="workspace">Use Bluetooth Upload</button>
           <button class="secondary" data-action="setSerialDeploy" data-requires="workspace">Use Serial Upload</button>
           <button data-action="deployProject" data-requires="project-toolchain">Deploy Current Mode</button>
@@ -405,17 +413,22 @@ export class ProjectSetupPanel {
         ports.appendChild(div);
       });
 
-      const deploy = state.deploy || { transport: 'serial', bleName: 'ZebraBot', bleChunkSize: 12 };
+      const deploy = state.deploy || { transport: 'serial', bleName: 'ZebraBot', bleChunkSize: 12, wifiUrl: 'http://192.168.4.1:8080', wifiTimeout: 15 };
       const isBle = deploy.transport === 'ble';
-      setBadge('deployBadge', isBle ? 'ok' : 'warn', isBle ? 'Bluetooth user program upload' : 'Serial full project install');
+      const isWifi = deploy.transport === 'wifi';
+      setBadge('deployBadge', isBle || isWifi ? 'ok' : 'warn', isWifi ? 'Wi-Fi user program upload' : (isBle ? 'Bluetooth user program upload' : 'Serial full project install'));
       rows('deployRows', [
-        ['Current mode', isBle ? 'Bluetooth' : 'Serial'],
+        ['Current mode', isWifi ? 'Wi-Fi' : (isBle ? 'Bluetooth' : 'Serial')],
+        ['Wi-Fi URL', deploy.wifiUrl || 'http://192.168.4.1:8080'],
+        ['Wi-Fi timeout', String(deploy.wifiTimeout || 15) + 's'],
         ['BLE name', deploy.bleName || 'ZebraBot'],
         ['BLE chunk', String(deploy.bleChunkSize || 12)],
       ]);
-      document.getElementById('serialMode').classList.toggle('active', !isBle);
+      document.getElementById('serialMode').classList.toggle('active', !isBle && !isWifi);
       document.getElementById('bleMode').classList.toggle('active', isBle);
+      document.getElementById('wifiMode').classList.toggle('active', isWifi);
       document.getElementById('bleNameInline').textContent = deploy.bleName || 'ZebraBot';
+      document.getElementById('wifiUrlInline').textContent = deploy.wifiUrl || 'http://192.168.4.1:8080';
 
       updateButtons();
     }

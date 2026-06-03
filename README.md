@@ -17,6 +17,14 @@ Open the Zebra activity bar panel or use the command palette:
 - `Zebra: Reset Device`
 - `Zebra: Open Serial Monitor`
 - `Zebra: Open USB UART Driver Help`
+- `Zebra: Open Robot Driver Docs`
+- `Zebra: Open Robot Simulator`
+
+## Robot simulator
+
+`Zebra: Open Robot Simulator` opens a 2D Ackermann robot simulator. Use it to place a robot, add rectangle or circle obstacles, drag distance/line/IMU sensors onto the robot, assign sensor ports, and run a simulated version of common user-code calls such as `drive.drive(...)`, `drive.stop()`, and `sleep_ms(...)`.
+
+Simulator layouts are saved to `.zebra/simulator.json` in the workspace.
 
 ## PlatformIO-like workflow
 
@@ -103,6 +111,29 @@ Use `Zebra: Open USB UART Driver Help` to open the official driver pages.
 
 The deploy command stages the runtime `main.py` and `robot/` package, then uploads the workspace `main.py` as `user_main.py`, matching the Zebra teleop flasher workflow.
 
+## Wi-Fi user program deploy
+
+Open `Zebra: Project Setup`, use the Upload Method card, and choose
+`Use Wi-Fi Upload` to set `zebra.deployTransport` to `wifi`. This uploads only
+the staged `user_main.py` to the Zebra Wi-Fi code server from the C-modules
+driver runtime. Use serial deploy first after flashing so `main.py`, `boot.py`,
+and `robot/wifi_code.py` are installed on the board.
+
+By default the extension targets the board access-point URL:
+
+```json
+{
+  "zebra.deployTransport": "wifi",
+  "zebra.wifiUrl": "http://192.168.4.1:8080"
+}
+```
+
+If your robot joins another network, set `zebra.wifiUrl` to the STA URL shown
+by the board, for example `http://192.168.1.44:8080`. If the runtime is
+configured with a token, set `zebra.wifiToken` too. Wi-Fi deploy posts
+`/user_main.py`, requests a reset, and uses `zebra.wifiTimeout` for the HTTP
+timeout.
+
 ## BLE user program deploy
 
 Open `Zebra: Project Setup`, use the Upload Method card, and choose
@@ -123,7 +154,8 @@ Useful settings:
 - `zebra.bleChunkSize`: defaults to `12` for conservative BLE writes
 
 Use `serial` deploy when installing or refreshing the full runtime and `robot/`
-driver package.
+driver package. Use `wifi` or `ble` for the faster edit/program loop once the
+runtime is already on the board.
 
 
 ## Initialize Project includes Toolchain Setup

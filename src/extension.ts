@@ -18,6 +18,7 @@ import {
   ProjectSetupState,
 } from './projectSetupPanel';
 import { DriverDocsPanel } from './driverDocsPanel';
+import { SimulatorPanel } from './simulatorPanel';
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool', 'bleak'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/ZbotDriver.git';
@@ -102,6 +103,7 @@ export function activate(context: vscode.ExtensionContext): void {
   registerCommand(context, 'zebra.openSerialMonitor', openSerialMonitorCommand, true);
   registerCommand(context, 'zebra.openDriverHelp', openDriverHelp, false);
   registerCommand(context, 'zebra.openDriverDocs', openDriverDocsCommand, false);
+  registerCommand(context, 'zebra.openSimulator', openSimulatorCommand, false);
 
   void updateProjectContext();
   vscode.workspace.onDidChangeWorkspaceFolders(() => void updateProjectContext(), null, context.subscriptions);
@@ -151,9 +153,11 @@ async function getProjectSetupState(): Promise<ProjectSetupState> {
   const toolchainReady = fs.existsSync(toolPython);
   const configuredPort = getWorkspaceConfig<string>('port', 'AUTO');
   const deployTransportRaw = getWorkspaceConfig<string>('deployTransport', 'serial').trim().toLowerCase();
-  const deployTransport = deployTransportRaw === 'ble' ? 'ble' : 'serial';
+  const deployTransport = normalizeDeployTransport(deployTransportRaw);
   const bleName = getWorkspaceConfig<string>('bleName', 'ZebraBot') || 'ZebraBot';
   const bleChunkSize = Math.max(1, Math.min(128, getWorkspaceConfig<number>('bleChunkSize', 12) || 12));
+  const wifiUrl = normalizeWifiUrl(getWorkspaceConfig<string>('wifiUrl', 'http://192.168.4.1:8080'));
+  const wifiTimeout = Math.max(1, Math.min(120, getWorkspaceConfig<number>('wifiTimeout', 15) || 15));
   const serialPorts: ProjectSetupState['serial']['ports'] = [];
   let serialSummary = toolchainReady ? 'Not checked' : 'Install the toolchain first';
   let serialChecked = false;
@@ -207,8 +211,14 @@ async function getProjectSetupState(): Promise<ProjectSetupState> {
       transport: deployTransport,
       bleName,
       bleChunkSize,
+      wifiUrl,
+      wifiTimeout,
     },
   };
+}
+
+function normalizeDeployTransport(value: string): 'serial' | 'ble' | 'wifi' {
+  return value === 'ble' || value === 'wifi' ? value : 'serial';
 }
 
 async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> {
@@ -269,6 +279,9 @@ async function runProjectSetupAction(action: ProjectSetupAction): Promise<void> 
       break;
     case 'setBleDeploy':
       await vscode.workspace.getConfiguration('zebra').update('deployTransport', 'ble', vscode.ConfigurationTarget.Workspace);
+      break;
+    case 'setWifiDeploy':
+      await vscode.workspace.getConfiguration('zebra').update('deployTransport', 'wifi', vscode.ConfigurationTarget.Workspace);
       break;
   }
 
@@ -490,6 +503,10 @@ async function openDriverDocsCommand(): Promise<void> {
   await DriverDocsPanel.show(extensionContext.extensionUri, docsRoot);
 }
 
+async function openSimulatorCommand(): Promise<void> {
+  await SimulatorPanel.show(extensionContext.extensionUri, getWorkspaceRoot);
+}
+
 async function getDriverDocsRoot(): Promise<string> {
   return path.join(getDriverCacheDir(), 'docs');
 }
@@ -544,11 +561,13 @@ async function createUserMainFromExampleCommand(): Promise<void> {
 
   await fs.promises.copyFile(pick.example.path, target);
   output.appendLine(`Created ${target} from ${path.basename(pick.example.path)}`);
+  await ensureRobotDriversInstalled(root);
+  await ensureProjectNativeDriverBinariesInstalled(root);
   await updateProjectContext();
 
   const document = await vscode.workspace.openTextDocument(target);
   await vscode.window.showTextDocument(document);
-  void vscode.window.showInformationMessage('Created user_main.py from example. It works with both serial and Bluetooth deploy modes.');
+  void vscode.window.showInformationMessage('Created user_main.py from example and checked robot driver binaries.');
 }
 
 async function listUserMainExamples(): Promise<UserMainExample[]> {
@@ -588,11 +607,17 @@ async function deployProjectCommand(): Promise<void> {
   }
 
   const toolPython = await ensureToolPython();
-  const deployTransport = getWorkspaceConfig<string>('deployTransport', 'serial').trim().toLowerCase();
+  const deployTransport = normalizeDeployTransport(getWorkspaceConfig<string>('deployTransport', 'serial').trim().toLowerCase());
 
   if (deployTransport === 'ble') {
     await deployUserProgramWithBle(root, toolPython);
     void vscode.window.showInformationMessage('Zebra user program deployed over BLE.');
+    return;
+  }
+
+  if (deployTransport === 'wifi') {
+    await deployUserProgramWithWifi(root, toolPython);
+    void vscode.window.showInformationMessage('Zebra user program deployed over Wi-Fi.');
     return;
   }
 
@@ -665,6 +690,46 @@ async function deployUserProgramWithBle(root: string, toolPython: string): Promi
         String(chunkSize),
         '--reset',
       ]);
+    },
+  );
+}
+
+async function deployUserProgramWithWifi(root: string, toolPython: string): Promise<void> {
+  const wifiUrl = normalizeWifiUrl(getWorkspaceConfig<string>('wifiUrl', 'http://192.168.4.1:8080'));
+  const wifiToken = getWorkspaceConfig<string>('wifiToken', '');
+  const wifiTimeout = Math.max(1, Math.min(120, getWorkspaceConfig<number>('wifiTimeout', 15) || 15));
+
+  if (!wifiUrl) {
+    throw new Error('Wi-Fi deploy requires zebra.wifiUrl, for example http://192.168.4.1:8080.');
+  }
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `Zebra: Wi-Fi upload to ${wifiUrl}`, cancellable: false },
+    async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
+      const stage = await buildStagedProject(root);
+      const userMain = path.join(stage, 'user_main.py');
+      if (!fs.existsSync(userMain)) {
+        throw new Error('Staged user_main.py was not created.');
+      }
+
+      const args = [
+        getWifiPutScriptPath(),
+        wifiUrl,
+        userMain,
+        '/user_main.py',
+        '--timeout',
+        String(wifiTimeout),
+        '--reset',
+      ];
+      if (wifiToken) {
+        args.push('--token', wifiToken);
+      }
+
+      output.appendLine(`Wi-Fi deploy stage: ${stage}`);
+      output.appendLine(`Wi-Fi uploading ${userMain} to /user_main.py at ${wifiUrl}`);
+      progress.report({ message: 'Uploading user_main.py over Wi-Fi...' });
+
+      await runCommand(toolPython, args);
     },
   );
 }
@@ -958,7 +1023,7 @@ async function openSerialMonitorCommand(): Promise<void> {
   const baud = String(getWorkspaceConfig<number>('serialMonitorBaud', 115200));
   const terminal = vscode.window.createTerminal('Zebra Serial Monitor');
   terminal.show();
-  terminal.sendText(`${quoteShell(toolPython)} -m mpremote connect ${quoteShell(port)} resume repl --capture serial.log`, true);
+  terminal.sendText(`${terminalCommandPath(toolPython)} -m mpremote connect ${quoteTerminalArg(port)} resume repl --capture serial.log`, true);
   output.appendLine(`Opened serial monitor for ${port} at ${baud} baud. Note: mpremote controls baud internally for REPL connections.`);
 }
 
@@ -1046,6 +1111,28 @@ async function ensureRobotDriversInstalled(projectRoot: string, force = false): 
 
   await copyTree(source, robotDst);
   output.appendLine(`Installed robot drivers from ${source} -> ${robotDst}`);
+}
+
+async function ensureProjectNativeDriverBinariesInstalled(projectRoot: string): Promise<void> {
+  const source = await getRobotDriverSource();
+  if (!source || !fs.existsSync(source)) {
+    throw new Error('Could not find robot drivers in resources/runtime/robot, configured cache, or cloned repo cache.');
+  }
+
+  const robotDst = path.join(projectRoot, 'robot');
+  await fs.promises.mkdir(robotDst, { recursive: true });
+
+  const binaries = (await walk(source))
+    .filter(file => path.extname(file).toLowerCase() === '.mpy')
+    .sort((a, b) => normalizePath(path.relative(source, a)).localeCompare(normalizePath(path.relative(source, b))));
+
+  for (const binary of binaries) {
+    const rel = normalizePath(path.relative(source, binary));
+    const dest = path.join(robotDst, rel);
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    await fs.promises.copyFile(binary, dest);
+    output.appendLine(`Installed native driver binary ${rel}`);
+  }
 }
 
 async function getRobotDriverSource(): Promise<string> {
@@ -1377,6 +1464,17 @@ async function ensurePythonPackage(toolPython: string, packageName: string): Pro
 
 function getBlePutScriptPath(): string {
   return path.join(extensionContext.extensionPath, 'resources', 'tools', 'ble_put.py');
+}
+
+function getWifiPutScriptPath(): string {
+  return path.join(extensionContext.extensionPath, 'resources', 'tools', 'wifi_put.py');
+}
+
+function normalizeWifiUrl(value: string): string {
+  const trimmed = (value || '').trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/+$/, '');
+  return `http://${trimmed}`.replace(/\/+$/, '');
 }
 
 async function updateZebraJson(patch: Record<string, unknown>): Promise<void> {
@@ -2074,6 +2172,14 @@ function quoteShell(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function terminalCommandPath(value: string): string {
+  return process.platform === 'win32' ? `& ${quotePowerShellArg(value)}` : quoteShell(value);
+}
+
+function quoteTerminalArg(value: string): string {
+  return process.platform === 'win32' ? quotePowerShellArg(value) : quoteShell(value);
+}
+
 function quotePowerShellArg(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
@@ -2423,6 +2529,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
       commandItem('Check Driver Cache Updates', 'zebra.checkDriverCacheUpdates', 'cloud-download'),
       commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),
       commandItem('Deploy Project / User Program', 'zebra.deployProject', 'cloud-upload'),
+      commandItem('Robot Simulator', 'zebra.openSimulator', 'debug-start'),
       commandItem('Serial Monitor', 'zebra.openSerialMonitor', 'terminal'),
       commandItem('Flash Firmware', 'zebra.flashFirmware', 'zap'),
       commandItem('Robot Driver Docs', 'zebra.openDriverDocs', 'book'),

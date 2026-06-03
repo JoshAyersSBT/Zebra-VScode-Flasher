@@ -77,6 +77,7 @@ test('buildStagedProject stages runtime and project entrypoint', () => {
 
   writeFile(path.join(runtimeRoot, 'main.py'), 'runtime main');
   writeFile(path.join(runtimeRoot, 'robot', 'motors.py'), 'runtime motors');
+  writeFile(path.join(runtimeRoot, 'robot', 'native_motor.mpy'), 'native motor binary');
   writeFile(path.join(projectRoot, 'main.py'), 'student main');
   writeFile(path.join(projectRoot, 'lib', 'helpers.py'), 'helper');
 
@@ -85,12 +86,14 @@ test('buildStagedProject stages runtime and project entrypoint', () => {
   assert.equal(readFile(path.join(stage, 'main.py')), 'runtime main');
   assert.equal(readFile(path.join(stage, 'user_main.py')), 'student main');
   assert.equal(readFile(path.join(stage, 'robot', 'motors.py')), 'runtime motors');
+  assert.equal(readFile(path.join(stage, 'robot', 'native_motor.mpy')), 'native motor binary');
   assert.equal(readFile(path.join(stage, 'lib', 'helpers.py')), 'helper');
   assert.deepEqual(rels(stage), [
     'lib/helpers.py',
     'main.py',
     'robot/__init__.py',
     'robot/motors.py',
+    'robot/native_motor.mpy',
     'user_main.py',
   ]);
 });
