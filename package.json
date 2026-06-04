@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"
@@ -245,7 +245,7 @@
         "zebra.nativeBuildRoot": {
           "type": "string",
           "default": "~/zbot-fw",
-          "description": "Linux/WSL directory used for native Zebra MicroPython firmware build dependencies."
+          "description": "Linux/WSL directory used for native Zebra MicroPython firmware build dependencies and C module sources."
         },
         "zebra.wslFlasherUsername": {
           "type": "string",
@@ -270,7 +270,7 @@
         "zebra.driverRepoUrl": {
           "type": "string",
           "default": "https://github.com/JoshAyersSBT/ZbotDriver.git",
-          "description": "Repository used to populate the local Zebra robot driver cache when robot/ is not already cached."
+          "description": "Repository used to populate the local Zebra robot driver cache and native firmware C modules."
         },
         "zebra.driverRepoBranch": {
           "type": "string",

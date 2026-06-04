@@ -48,13 +48,17 @@ https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin
 
 The command caches the downloaded `.bin` in the extension's global storage and reuses it on future flashes. You can also choose `Select ESP32 firmware .bin` to flash a local ESP32 MicroPython binary instead.
 
-For Zebra native C firmware builds, choose `Select Zebra native firmware folder` and select a folder containing:
+For Zebra native C firmware builds, choose `Use auto-collected Zebra native firmware build`. Zebra looks under `zebra.nativeBuildRoot` for the MicroPython ESP32 build output, including the default `build-ZBOT` folder created by `Zebra: Setup Native C Firmware Toolchain`.
+
+If that native build is not present yet, Zebra starts the native firmware setup/download/build flow automatically. Wait for the setup terminal to finish, then run `Zebra: Flash MicroPython Firmware` again and choose the same auto-collected native build option.
+
+If your native build output is somewhere else, choose `Select Zebra native firmware folder` and select the MicroPython ESP32 build folder containing:
 
 - `bootloader.bin`
 - `partition-table.bin`
-- `micropython.bin`
+- `micropython.bin` or `firmware.bin`
 
-The extension flashes those at `0x1000`, `0x8000`, and `0x10000` with the ESP32 flash settings used by the native Zebra build.
+The extension also accepts the standard ESP32 nested layout with `bootloader/bootloader.bin` and `partition_table/partition-table.bin`. It flashes those at `0x1000`, `0x8000`, and `0x10000` with the ESP32 flash settings used by the native Zebra build.
 
 ## Toolchain
 
@@ -82,9 +86,9 @@ Set `zebra.pythonPath` only when you want to force a specific Python executable.
 
 `Zebra: Setup Native C Firmware Toolchain` prepares the dependencies used to build the Zebra C driver modules and native `user_main.c` firmware.
 
-On Windows, it bootstraps WSL Debian when needed and creates a default Linux flasher account automatically. The account defaults to username `flasher` and password `flasher`; override these with `zebra.wslFlasherUsername` and `zebra.wslFlasherPassword` before setup if you need different credentials. If Windows requires a reboot during WSL installation, reboot and run the command again. Once Debian is available, it installs Linux build packages, clones MicroPython `v1.28.0`, clones ESP-IDF `v5.5.1`, installs ESP-IDF tools for `esp32`, builds `mpy-cross`, and prepares ESP32 submodules.
+On Windows, it bootstraps WSL Debian when needed and creates a default Linux flasher account automatically. The account defaults to username `flasher` and password `flasher`; override these with `zebra.wslFlasherUsername` and `zebra.wslFlasherPassword` before setup if you need different credentials. If Windows requires a reboot during WSL installation, reboot and run the command again. Once Debian is available, it installs Linux build packages, clones MicroPython `v1.28.0`, clones ESP-IDF `v5.5.1`, clones the configured Zebra driver repo for native C modules, installs ESP-IDF tools for `esp32`, builds `mpy-cross`, and prepares ESP32 submodules.
 
-On macOS, it uses Homebrew to install the native build packages, then clones and prepares the same MicroPython and ESP-IDF toolchains. On Linux, it supports `apt`, `dnf`, and `pacman`; other distributions get a clear package list to install manually. The build root defaults to `~/zbot-fw` and can be changed with `zebra.nativeBuildRoot`.
+On macOS, it uses Homebrew to install the native build packages, then clones and prepares the same MicroPython, ESP-IDF, and Zebra C-module sources. On Linux, it supports `apt`, `dnf`, and `pacman`; other distributions get a clear package list to install manually. The build root defaults to `~/zbot-fw` and can be changed with `zebra.nativeBuildRoot`. The C-module repo comes from `zebra.driverRepoUrl` and `zebra.driverRepoBranch`; the setup command builds `build-ZBOT` with the collected `micropython/cmodules/micropython.cmake`.
 
 ## USB UART drivers
 
