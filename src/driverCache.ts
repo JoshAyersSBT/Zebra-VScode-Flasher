@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import { runCommand } from './process';
 
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/ZbotDriver.git';
-const DEFAULT_DRIVER_REPO_BRANCH = 'codex/C-Core-modules';
+const DEFAULT_DRIVER_REPO_BRANCH = 'main';
 
 export function getGlobalDriverCacheDir(context: vscode.ExtensionContext): string {
   return path.join(context.globalStorageUri.fsPath, 'zbot-driver-cache');

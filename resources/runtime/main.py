@@ -76,6 +76,35 @@ API = None
 zbot = None
 
 
+def _load_color_calibrations():
+    try:
+        from robot.color_calibration import COLOR_CALIBRATIONS
+    except Exception:
+        return {}
+
+    out = {}
+    try:
+        for port, entries in COLOR_CALIBRATIONS.items():
+            port_i = int(port)
+            if isinstance(entries, dict):
+                normalized_entries = []
+                for color, entry in entries.items():
+                    if isinstance(entry, dict):
+                        item = dict(entry)
+                        item["color"] = str(item.get("color", color))
+                        normalized_entries.append(item)
+                out[port_i] = normalized_entries
+            elif isinstance(entries, (list, tuple)):
+                out[port_i] = [
+                    entry for entry in entries
+                    if isinstance(entry, dict) and entry.get("color") is not None
+                ]
+    except Exception:
+        return {}
+
+    return out
+
+
 def _cfg(name, default=None):
     return getattr(robot_config, name, default)
 
@@ -236,6 +265,7 @@ class RobotAPI:
             "steering": {},
             "imu": {},
             "sensors": {},
+            "color_calibrations": _load_color_calibrations(),
             "buttons": {},
             "services": {},
             "user": {
@@ -695,7 +725,9 @@ class _ZBotSensor:
         value = item.get("value", {})
         color = value.get("color")
         if color is None:
-            return None
+            rgb = self.rgb()
+            match = _match_calibrated_color(self.api, self.port, rgb)
+            return None if match is None else match.get("color")
         return str(color)
 
     def color_match(self):
@@ -704,11 +736,20 @@ class _ZBotSensor:
             return None
 
         value = item.get("value", {})
+        rgb = self.rgb()
+        match = _match_calibrated_color(self.api, self.port, rgb)
+        color = value.get("color")
+        confidence = int(value.get("confidence", 0))
+        normalized = value.get("normalized")
+        if match is not None:
+            color = match.get("color")
+            confidence = int(match.get("confidence", 0))
+            normalized = match.get("normalized")
         return {
-            "color": value.get("color"),
-            "confidence": int(value.get("confidence", 0)),
-            "rgb": self.rgb(),
-            "normalized": value.get("normalized"),
+            "color": color,
+            "confidence": confidence,
+            "rgb": rgb,
+            "normalized": normalized,
             "range": item.get("meta", {}).get("range"),
         }
 
@@ -717,6 +758,65 @@ class _ZBotSensor:
         if color is None:
             return False
         return color.lower() == str(name).lower()
+
+
+def _normalized_rgb(rgb):
+    if not isinstance(rgb, dict):
+        return None
+
+    r = max(0, int(rgb.get("r", 0)))
+    g = max(0, int(rgb.get("g", 0)))
+    b = max(0, int(rgb.get("b", 0)))
+    total = r + g + b
+    if total <= 0:
+        return None
+
+    return {
+        "r": (r * 1000) // total,
+        "g": (g * 1000) // total,
+        "b": (b * 1000) // total,
+    }
+
+
+def _match_calibrated_color(api, port, rgb):
+    if api is None:
+        return None
+
+    normalized = _normalized_rgb(rgb)
+    if normalized is None:
+        return None
+
+    calibrations = api.status.get("color_calibrations", {})
+    entries = calibrations.get(int(port), [])
+    if not entries:
+        return None
+
+    best = None
+    best_distance = None
+    for entry in entries:
+        ref = entry.get("normalized")
+        if not isinstance(ref, dict):
+            continue
+
+        distance = (
+            abs(int(ref.get("r", 0)) - normalized["r"]) +
+            abs(int(ref.get("g", 0)) - normalized["g"]) +
+            abs(int(ref.get("b", 0)) - normalized["b"])
+        )
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best = entry
+
+    if best is None:
+        return None
+
+    confidence = max(0, 100 - (best_distance // 6))
+    return {
+        "color": best.get("color"),
+        "confidence": confidence,
+        "normalized": normalized,
+        "distance": best_distance,
+    }
 
 
 class _ZBotServo:
@@ -891,6 +991,42 @@ class ZBot:
     def rgb(self, port):
         s = self.sensor(port)
         return s.rgb()
+
+    def color_match(self, port):
+        s = self.sensor(port)
+        return s.color_match()
+
+    def calibrate_color(self, port, name):
+        if self.api is None:
+            return None
+
+        port = int(port)
+        rgb = self.rgb(port)
+        normalized = _normalized_rgb(rgb)
+        if normalized is None:
+            return None
+
+        color = str(name)
+        calibrations = self.api.status.setdefault("color_calibrations", {})
+        entries = calibrations.setdefault(port, [])
+        entries[:] = [entry for entry in entries if str(entry.get("color", "")).lower() != color.lower()]
+        entry = {
+            "color": color,
+            "rgb": rgb,
+            "normalized": normalized,
+            "ts_ms": time.ticks_ms(),
+        }
+        entries.append(entry)
+
+        item = self.api.get_sensor("color_port_{}".format(port))
+        if isinstance(item, dict) and isinstance(item.get("value"), dict):
+            value = dict(item.get("value", {}))
+            value["color"] = color
+            value["confidence"] = 100
+            value["normalized"] = normalized
+            self.api.publish_sensor("color_port_{}".format(port), value, item.get("meta"))
+
+        return entry
 
     def status(self):
         if self.api is None:

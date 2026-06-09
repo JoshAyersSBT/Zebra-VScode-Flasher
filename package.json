@@ -2,7 +2,7 @@
   "name": "zebra-vscode-flasher",
   "displayName": "Zebra MicroPython",
   "description": "PlatformIO-style VS Code extension for ZebraBot MicroPython setup, projects, flashing, deployment, and serial monitoring.",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "publisher": "zebra-robotics",
   "engines": {
     "vscode": "^1.92.0"
@@ -34,7 +34,8 @@
     "onCommand:zebra.openSerialMonitor",
     "onCommand:zebra.openDriverHelp",
     "onCommand:zebra.openDriverDocs",
-    "onCommand:zebra.openSimulator"
+    "onCommand:zebra.openSimulator",
+    "onCommand:zebra.openSensorCalibration"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -170,6 +171,11 @@
         "command": "zebra.openSimulator",
         "title": "Zebra: Open Robot Simulator",
         "icon": "$(debug-start)"
+      },
+      {
+        "command": "zebra.openSensorCalibration",
+        "title": "Zebra: Sensor Calibration",
+        "icon": "$(symbol-color)"
       }
     ],
     "menus": {
@@ -183,6 +189,11 @@
           "command": "zebra.projectSetup",
           "when": "view == zebraExplorer",
           "group": "navigation@2"
+        },
+        {
+          "command": "zebra.openSensorCalibration",
+          "when": "view == zebraExplorer",
+          "group": "navigation@3"
         }
       ],
       "editor/title": [
@@ -216,6 +227,11 @@
           "command": "zebra.openSimulator",
           "when": "zebra.projectActive",
           "group": "zebra@4"
+        },
+        {
+          "command": "zebra.openSensorCalibration",
+          "when": "zebra.projectActive",
+          "group": "zebra@5"
         }
       ]
     },
@@ -274,8 +290,8 @@
         },
         "zebra.driverRepoBranch": {
           "type": "string",
-          "default": "codex/C-Core-modules",
-          "description": "Branch or tag to use when cloning zebra.driverRepoUrl. Defaults to the C-core modules driver branch."
+          "default": "main",
+          "description": "Branch or tag to use when cloning zebra.driverRepoUrl. Defaults to the main driver branch."
         },
         "zebra.serialMonitorBaud": {
           "type": "number",

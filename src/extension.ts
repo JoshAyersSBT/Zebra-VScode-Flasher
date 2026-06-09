@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as cp from 'child_process';
 import * as https from 'https';
+import * as crypto from 'crypto';
 
 import {
   SerialCandidate,
@@ -19,10 +20,16 @@ import {
 } from './projectSetupPanel';
 import { DriverDocsPanel } from './driverDocsPanel';
 import { SimulatorPanel } from './simulatorPanel';
+import {
+  SensorCalibrationData,
+  SensorCalibrationPanel,
+  SensorCalibrationSample,
+  SensorCalibrationState,
+} from './sensorCalibrationPanel';
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool', 'bleak'];
 const DEFAULT_DRIVER_REPO = 'https://github.com/JoshAyersSBT/ZbotDriver.git';
-const DEFAULT_DRIVER_REPO_BRANCH = 'codex/C-Core-modules';
+const DEFAULT_DRIVER_REPO_BRANCH = 'main';
 const DEFAULT_MICROPYTHON_FIRMWARE_URL = 'https://micropython.org/resources/firmware/ESP32_GENERIC-20260406-v1.28.0.bin';
 const DEFAULT_NATIVE_BUILD_ROOT = '~/zbot-fw';
 const DEFAULT_WSL_FLASHER_USERNAME = 'flasher';
@@ -68,6 +75,14 @@ interface DriverCacheStatus {
   cacheBranch?: string;
 }
 
+interface DeployManifest {
+  version: 1;
+  projectRoot: string;
+  port: string;
+  runtimeSignature: string;
+  files: Record<string, string>;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   output = vscode.window.createOutputChannel('Zebra Flasher');
@@ -104,6 +119,7 @@ export function activate(context: vscode.ExtensionContext): void {
   registerCommand(context, 'zebra.openDriverHelp', openDriverHelp, false);
   registerCommand(context, 'zebra.openDriverDocs', openDriverDocsCommand, false);
   registerCommand(context, 'zebra.openSimulator', openSimulatorCommand, false);
+  registerCommand(context, 'zebra.openSensorCalibration', openSensorCalibrationCommand, false);
 
   void updateProjectContext();
   vscode.workspace.onDidChangeWorkspaceFolders(() => void updateProjectContext(), null, context.subscriptions);
@@ -358,7 +374,7 @@ async function setupNativeToolchainCommand(): Promise<void> {
     terminal.show();
     terminal.sendText(`wsl.exe -d ${quotePowerShellArg(distro)} -- bash ${quotePowerShellArg(wslScript)}`, true);
     output.appendLine(`Opened WSL native C setup in distro: ${distro}`);
-    void vscode.window.showInformationMessage('Zebra native C setup started in a terminal. Re-run after it finishes if sudo prompts were needed.');
+    void vscode.window.showInformationMessage('Zebra native C setup started in a terminal. Run flash again after the setup build finishes.');
     return;
   }
 
@@ -508,6 +524,176 @@ async function openSimulatorCommand(): Promise<void> {
   await SimulatorPanel.show(extensionContext.extensionUri, getWorkspaceRoot);
 }
 
+async function openSensorCalibrationCommand(): Promise<void> {
+  await SensorCalibrationPanel.show(
+    getSensorCalibrationState,
+    captureSensorCalibrationSample,
+    saveSensorCalibrationData,
+    uploadSensorCalibrationData,
+  );
+}
+
+async function getSensorCalibrationState(): Promise<SensorCalibrationState> {
+  const root = getWorkspaceRoot() || null;
+  let serialPort = 'not checked';
+  try {
+    const toolPython = await ensureToolPython();
+    serialPort = await resolveSerialPort(toolPython);
+  } catch {
+    serialPort = 'not connected';
+  }
+
+  return {
+    workspaceRoot: root,
+    serialPort,
+    data: root ? await readSensorCalibrationData(root) : emptySensorCalibrationData(),
+  };
+}
+
+async function captureSensorCalibrationSample(sensorPort: number): Promise<SensorCalibrationSample> {
+  const toolPython = await ensureToolPython();
+  const port = await resolveSerialPort(toolPython);
+  const sensorPortInt = Math.max(1, Math.min(6, Math.floor(Number(sensorPort) || 1)));
+  const marker = '__ZEBRA_COLOR_SAMPLE__';
+  const script = [
+    'try:',
+    '    import ujson as json',
+    'except Exception:',
+    '    import json',
+    'import sys, time',
+    `sensor_port = ${sensorPortInt}`,
+    'sample = None',
+    'err = None',
+    'def find_runtime():',
+    '    for name in ("__main__", "main"):',
+    '        module = sys.modules.get(name)',
+    '        if module is None:',
+    '            continue',
+    '        z = getattr(module, "zbot", None)',
+    '        api = getattr(module, "API", None)',
+    '        if z is not None or api is not None:',
+    '            return z, api',
+    '    return None, None',
+    'def sample_from_snapshot(api):',
+    '    if api is None:',
+    '        return None',
+    '    sensors = api.get_sensor_snapshot()',
+    '    item = sensors.get("color_port_{}".format(sensor_port))',
+    '    if isinstance(item, dict) and isinstance(item.get("value"), dict):',
+    '        return item.get("value")',
+    '    return None',
+    'def direct_tcs3472_read():',
+    '    from machine import I2C, Pin',
+    '    import robot.config as cfg',
+    '    i2c = I2C(getattr(cfg, "TCA_I2C_ID", 0), sda=Pin(getattr(cfg, "TCA_SDA_GPIO", 21)), scl=Pin(getattr(cfg, "TCA_SCL_GPIO", 22)), freq=getattr(cfg, "TCA_I2C_FREQ", 400000))',
+    '    mux_addr = getattr(cfg, "TCA_ADDR", 0x70)',
+    '    channel = sensor_port',
+    '    if channel < 0 or channel > 7:',
+    '        raise RuntimeError("sensor port must map to mux channel 0..7")',
+    '    try:',
+    '        i2c.writeto(mux_addr, bytes([1 << channel]))',
+    '        time.sleep_ms(60)',
+    '    except Exception as e:',
+    '        raise RuntimeError("mux select failed: {}".format(e))',
+    '    addrs = i2c.scan()',
+    '    if 0x29 not in addrs:',
+    '        raise RuntimeError("no TCS3472 at port {}; scan={}".format(sensor_port, [hex(a) for a in addrs]))',
+    '    chip_id = i2c.readfrom_mem(0x29, 0x92, 1)[0]',
+    '    if chip_id not in (0x44, 0x4D):',
+    '        raise RuntimeError("unexpected TCS3472 id {}".format(hex(chip_id)))',
+    '    i2c.writeto_mem(0x29, 0x80 | 0x01, bytes([0xEB]))',
+    '    i2c.writeto_mem(0x29, 0x80 | 0x0F, bytes([0x01]))',
+    '    i2c.writeto_mem(0x29, 0x80 | 0x00, bytes([0x01]))',
+    '    i2c.writeto_mem(0x29, 0x80 | 0x00, bytes([0x03]))',
+    '    time.sleep_ms(80)',
+    '    data = i2c.readfrom_mem(0x29, 0x80 | 0x14, 8)',
+    '    clear = data[0] | (data[1] << 8)',
+    '    r = data[2] | (data[3] << 8)',
+    '    g = data[4] | (data[5] << 8)',
+    '    b = data[6] | (data[7] << 8)',
+    '    return {"r": r, "g": g, "b": b, "clear": clear}',
+    'for _ in range(15):',
+    '    try:',
+    '        zbot, api = find_runtime()',
+    '        if zbot is not None:',
+    '            sample = zbot.rgb(sensor_port)',
+    '        if sample is None:',
+    '            sample = sample_from_snapshot(api)',
+    '        if sample is None:',
+    '            sample = direct_tcs3472_read()',
+    '    except Exception as e:',
+    '        err = str(e)',
+    '        sample = None',
+    '    if sample:',
+    '        break',
+    '    time.sleep_ms(120)',
+    'if sample is None:',
+    '    print("' + marker + '" + json.dumps({"ok": False, "error": err or "No color sensor reading available"}))',
+    'else:',
+    '    total = int(sample.get("r", 0)) + int(sample.get("g", 0)) + int(sample.get("b", 0))',
+    '    if total <= 0:',
+    '        norm = {"r": 0, "g": 0, "b": 0}',
+    '    else:',
+    '        norm = {"r": (int(sample.get("r", 0)) * 1000) // total, "g": (int(sample.get("g", 0)) * 1000) // total, "b": (int(sample.get("b", 0)) * 1000) // total}',
+    '    print("' + marker + '" + json.dumps({"ok": True, "rgb": sample, "normalized": norm}))',
+  ].join('\n');
+
+  const raw = await runMpremoteCommand(toolPython, port, ['exec', script]);
+  const line = raw.split(/\r?\n/).find(item => item.includes(marker));
+  if (!line) {
+    throw new Error(`Could not read color sample from robot.\n\n${raw}`);
+  }
+
+  const parsed = JSON.parse(line.slice(line.indexOf(marker) + marker.length)) as {
+    ok: boolean;
+    error?: string;
+    rgb?: { r?: number; g?: number; b?: number; clear?: number };
+    normalized?: { r?: number; g?: number; b?: number };
+  };
+
+  if (!parsed.ok || !parsed.rgb || !parsed.normalized) {
+    throw new Error(parsed.error || 'No color sensor reading available.');
+  }
+
+  return {
+    port: sensorPortInt,
+    rgb: {
+      r: Number(parsed.rgb.r || 0),
+      g: Number(parsed.rgb.g || 0),
+      b: Number(parsed.rgb.b || 0),
+      clear: Number(parsed.rgb.clear || 0),
+    },
+    normalized: {
+      r: Number(parsed.normalized.r || 0),
+      g: Number(parsed.normalized.g || 0),
+      b: Number(parsed.normalized.b || 0),
+    },
+  };
+}
+
+async function saveSensorCalibrationData(data: SensorCalibrationData): Promise<SensorCalibrationState> {
+  const root = requireWorkspaceRoot();
+  const normalized = normalizeSensorCalibrationData(data);
+  normalized.updatedAt = new Date().toISOString();
+  await writeSensorCalibrationFiles(root, normalized);
+  return getSensorCalibrationState();
+}
+
+async function uploadSensorCalibrationData(data: SensorCalibrationData): Promise<SensorCalibrationState> {
+  const root = requireWorkspaceRoot();
+  const normalized = normalizeSensorCalibrationData(data);
+  normalized.updatedAt = new Date().toISOString();
+  const pythonFile = await writeSensorCalibrationFiles(root, normalized);
+  const toolPython = await ensureToolPython();
+  const port = await resolveSerialPort(toolPython);
+
+  await runMpremoteCommand(toolPython, port, ['fs', 'mkdir', ':robot'], true);
+  await runMpremoteCommand(toolPython, port, ['fs', 'cp', pythonFile, ':robot/color_calibration.py']);
+  await runMpremoteCommand(toolPython, port, ['reset'], true);
+  void vscode.window.showInformationMessage('Sensor calibration uploaded. The robot is resetting to load the new color dictionary.');
+  return getSensorCalibrationState();
+}
+
 async function getDriverDocsRoot(): Promise<string> {
   return path.join(getDriverCacheDir(), 'docs');
 }
@@ -638,19 +824,43 @@ async function deployProjectCommand(): Promise<void> {
         throw new Error('No deployable .py or .mpy files found.');
       }
 
+      const runtimeSignature = await getRuntimeSignatureForProject(root);
+      const manifest = await readDeployManifest(root, port);
+      const stagedHashes = await hashDeployFiles(stage, files);
+      const changedFiles = files.filter((localPath: string) => {
+        const rel = normalizePath(path.relative(stage, localPath));
+        return !manifest || manifest.runtimeSignature !== runtimeSignature || manifest.files[rel] !== stagedHashes[rel];
+      });
+
       output.appendLine(`Deploy stage: ${stage}`);
-      output.appendLine(`Deploying ${files.length} file(s) to ${port}`);
+      output.appendLine(`Deploy manifest: ${getDeployManifestPath(root, port)}`);
+
+      if (!changedFiles.length) {
+        output.appendLine(`No changed deploy files for ${port}; device is up to date.`);
+        progress.report({ message: 'No changed files to upload.' });
+        return;
+      }
+
+      if (!manifest) {
+        output.appendLine('No previous deploy manifest; uploading all staged files.');
+      } else if (manifest.runtimeSignature !== runtimeSignature) {
+        output.appendLine('Runtime or driver source changed; uploading all staged files.');
+      }
+
+      output.appendLine(`Deploying ${changedFiles.length}/${files.length} changed file(s) to ${port}`);
 
       const madeDirs = new Set<string>();
-      for (let i = 0; i < files.length; i++) {
-        const localPath = files[i];
+      for (let i = 0; i < changedFiles.length; i++) {
+        const localPath = changedFiles[i];
         const rel = normalizePath(path.relative(stage, localPath));
-        progress.report({ message: `${i + 1}/${files.length}: ${rel}` });
-        output.appendLine(`[${i + 1}/${files.length}] ${rel}`);
+        progress.report({ message: `${i + 1}/${changedFiles.length}: ${rel}` });
+        output.appendLine(`[${i + 1}/${changedFiles.length}] ${rel}`);
 
         await ensureRemoteDirs(toolPython, port, rel, madeDirs);
         await runMpremoteCommand(toolPython, port, ['fs', 'cp', localPath, `:/${rel}`]);
       }
+
+      await writeDeployManifest(root, port, runtimeSignature, stagedHashes);
 
       progress.report({ message: 'Resetting device...' });
       await runMpremoteCommand(toolPython, port, ['reset'], true);
@@ -1006,7 +1216,7 @@ async function resolveNativeBuildRootForHost(): Promise<string | undefined> {
 
   const script = [
     `ZBOT_FW_ROOT=${quoteShellLiteral(buildRoot)}`,
-    'case "$ZBOT_FW_ROOT" in "~"|"~/"*) ZBOT_FW_ROOT="$HOME${ZBOT_FW_ROOT#~}" ;; esac',
+    'case "$ZBOT_FW_ROOT" in "~"|"~/"*) ZBOT_FW_ROOT="$HOME${ZBOT_FW_ROOT#\\~}" ;; esac',
     'wslpath -w "$ZBOT_FW_ROOT"',
   ].join('\n');
 
@@ -1508,6 +1718,116 @@ async function collectDeployFiles(root: string): Promise<string[]> {
     .sort((a: string, b: string) => normalizePath(path.relative(root, a)).localeCompare(normalizePath(path.relative(root, b))));
 }
 
+async function hashDeployFiles(stage: string, files: string[]): Promise<Record<string, string>> {
+  const hashes: Record<string, string> = {};
+  for (const file of files) {
+    const rel = normalizePath(path.relative(stage, file));
+    hashes[rel] = await hashFile(file);
+  }
+  return hashes;
+}
+
+async function hashFile(file: string): Promise<string> {
+  const hash = crypto.createHash('sha256');
+  hash.update(await fs.promises.readFile(file));
+  return hash.digest('hex');
+}
+
+async function readDeployManifest(projectRoot: string, port: string): Promise<DeployManifest | undefined> {
+  const file = getDeployManifestPath(projectRoot, port);
+  if (!fs.existsSync(file)) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(file, 'utf8')) as DeployManifest;
+    if (
+      parsed.version !== 1 ||
+      parsed.projectRoot !== normalizePath(path.resolve(projectRoot)) ||
+      parsed.port !== port ||
+      !parsed.runtimeSignature ||
+      !parsed.files ||
+      typeof parsed.files !== 'object'
+    ) {
+      return undefined;
+    }
+    return parsed;
+  } catch (err: unknown) {
+    output.appendLine(`Ignoring unreadable deploy manifest: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
+async function writeDeployManifest(
+  projectRoot: string,
+  port: string,
+  runtimeSignature: string,
+  files: Record<string, string>,
+): Promise<void> {
+  const file = getDeployManifestPath(projectRoot, port);
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  const manifest: DeployManifest = {
+    version: 1,
+    projectRoot: normalizePath(path.resolve(projectRoot)),
+    port,
+    runtimeSignature,
+    files,
+  };
+  await fs.promises.writeFile(file, JSON.stringify(manifest, null, 2) + os.EOL, 'utf8');
+  output.appendLine(`Updated deploy manifest for ${Object.keys(files).length} file(s).`);
+}
+
+function getDeployManifestPath(projectRoot: string, port: string): string {
+  const key = crypto
+    .createHash('sha256')
+    .update(`${normalizePath(path.resolve(projectRoot))}\n${port}`)
+    .digest('hex');
+  return path.join(getDeployManifestDir(), `${key}.json`);
+}
+
+function getDeployManifestDir(): string {
+  return path.join(extensionContext.globalStorageUri.fsPath, 'deploy-manifests');
+}
+
+async function getRuntimeSignatureForProject(projectRoot: string): Promise<string> {
+  const runtimeRoot = getResolvedRuntimeRoot(projectRoot);
+  const parts = [
+    normalizePath(path.resolve(runtimeRoot)),
+    await getRuntimeRevision(runtimeRoot),
+  ];
+  return parts.join('\n');
+}
+
+async function getRuntimeRevision(runtimeRoot: string): Promise<string> {
+  const gitDir = path.join(runtimeRoot, '.git');
+  if (fs.existsSync(gitDir)) {
+    try {
+      return `git:${(await runCommand('git', ['-C', runtimeRoot, 'rev-parse', 'HEAD'], true)).trim()}`;
+    } catch {
+      return 'git:unknown';
+    }
+  }
+
+  return `files:${await hashRuntimeTree(runtimeRoot)}`;
+}
+
+async function hashRuntimeTree(runtimeRoot: string): Promise<string> {
+  const runtimeFiles = (await collectDeployFiles(runtimeRoot))
+    .filter((file: string) => {
+      const rel = normalizePath(path.relative(runtimeRoot, file));
+      return rel === 'main.py' || rel === 'boot.py' || rel.startsWith('robot/');
+    });
+  const hash = crypto.createHash('sha256');
+  for (const file of runtimeFiles) {
+    const rel = normalizePath(path.relative(runtimeRoot, file));
+    hash.update(rel);
+    hash.update('\0');
+    hash.update(await hashFile(file));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
 async function walk(root: string): Promise<string[]> {
   const out: string[] = [];
   if (!fs.existsSync(root)) return out;
@@ -1595,6 +1915,102 @@ function getBlePutScriptPath(): string {
 
 function getWifiPutScriptPath(): string {
   return path.join(extensionContext.extensionPath, 'resources', 'tools', 'wifi_put.py');
+}
+
+function emptySensorCalibrationData(): SensorCalibrationData {
+  return {
+    version: 1,
+    updatedAt: null,
+    ports: {},
+  };
+}
+
+async function readSensorCalibrationData(root: string): Promise<SensorCalibrationData> {
+  const file = sensorCalibrationJsonPath(root);
+  if (!fs.existsSync(file)) {
+    return emptySensorCalibrationData();
+  }
+
+  try {
+    return normalizeSensorCalibrationData(JSON.parse(await fs.promises.readFile(file, 'utf8')) as SensorCalibrationData);
+  } catch {
+    return emptySensorCalibrationData();
+  }
+}
+
+async function writeSensorCalibrationFiles(root: string, data: SensorCalibrationData): Promise<string> {
+  const jsonFile = sensorCalibrationJsonPath(root);
+  const pythonFile = sensorCalibrationPythonPath(root);
+  await fs.promises.mkdir(path.dirname(jsonFile), { recursive: true });
+  await fs.promises.writeFile(jsonFile, JSON.stringify(data, null, 2) + os.EOL, 'utf8');
+  await fs.promises.writeFile(pythonFile, sensorCalibrationPython(data), 'utf8');
+  output.appendLine(`Wrote sensor calibration dictionary: ${pythonFile}`);
+  return pythonFile;
+}
+
+function normalizeSensorCalibrationData(data: SensorCalibrationData): SensorCalibrationData {
+  const normalized = emptySensorCalibrationData();
+  normalized.updatedAt = data?.updatedAt || null;
+
+  const ports = data?.ports && typeof data.ports === 'object' ? data.ports : {};
+  for (const [port, entries] of Object.entries(ports)) {
+    const portKey = String(Math.max(1, Math.min(6, Math.floor(Number(port) || 1))));
+    if (!Array.isArray(entries)) continue;
+    normalized.ports[portKey] = entries
+      .filter(entry => entry && typeof entry.color === 'string')
+      .map(entry => ({
+        color: entry.color,
+        rgb: {
+          r: Math.max(0, Math.floor(Number(entry.rgb?.r) || 0)),
+          g: Math.max(0, Math.floor(Number(entry.rgb?.g) || 0)),
+          b: Math.max(0, Math.floor(Number(entry.rgb?.b) || 0)),
+          clear: Math.max(0, Math.floor(Number(entry.rgb?.clear) || 0)),
+        },
+        normalized: {
+          r: Math.max(0, Math.floor(Number(entry.normalized?.r) || 0)),
+          g: Math.max(0, Math.floor(Number(entry.normalized?.g) || 0)),
+          b: Math.max(0, Math.floor(Number(entry.normalized?.b) || 0)),
+        },
+        capturedAt: entry.capturedAt || new Date().toISOString(),
+      }));
+  }
+
+  return normalized;
+}
+
+function sensorCalibrationJsonPath(root: string): string {
+  return path.join(root, '.zebra', 'color_calibration.json');
+}
+
+function sensorCalibrationPythonPath(root: string): string {
+  return path.join(root, '.zebra', 'color_calibration.py');
+}
+
+function sensorCalibrationPython(data: SensorCalibrationData): string {
+  const lines = [
+    '# Generated by Zebra: Sensor Calibration',
+    '# Upload target: :/robot/color_calibration.py',
+    'COLOR_CALIBRATIONS = {',
+  ];
+
+  for (const port of Object.keys(data.ports).sort((a, b) => Number(a) - Number(b))) {
+    lines.push(`    ${Number(port)}: [`);
+    for (const entry of data.ports[port]) {
+      lines.push(
+        `        {"color": "${escapePythonString(entry.color)}", ` +
+        `"rgb": {"r": ${entry.rgb.r}, "g": ${entry.rgb.g}, "b": ${entry.rgb.b}, "clear": ${entry.rgb.clear}}, ` +
+        `"normalized": {"r": ${entry.normalized.r}, "g": ${entry.normalized.g}, "b": ${entry.normalized.b}}},`
+      );
+    }
+    lines.push('    ],');
+  }
+
+  lines.push('}');
+  return lines.join(os.EOL) + os.EOL;
+}
+
+function escapePythonString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function normalizeWifiUrl(value: string): string {
@@ -2443,6 +2859,9 @@ function wslFlasherUserProvisioningScript(username: string, password: string): s
     'elif getent group wheel >/dev/null 2>&1; then',
     '  usermod -aG wheel "$ZEBRA_USER"',
     'fi',
+    'mkdir -p /etc/sudoers.d',
+    'printf "%s ALL=(ALL) NOPASSWD:ALL\\n" "$ZEBRA_USER" > /etc/sudoers.d/zebra-flasher',
+    'chmod 0440 /etc/sudoers.d/zebra-flasher',
     'mkdir -p /etc',
     'printf "[user]\\ndefault=%s\\n" "$ZEBRA_USER" > /etc/wsl.conf',
     'mkdir -p "/home/$ZEBRA_USER"',
@@ -2487,7 +2906,7 @@ function nativeLinuxSetupScript(buildRootSetting: string): string {
     `ZBOT_FW_ROOT="${buildRoot.replace(/"/g, '\\"')}"`,
     `ZBOT_DRIVER_REPO=${quoteShellLiteral(driverRepo)}`,
     `ZBOT_DRIVER_BRANCH=${quoteShellLiteral(driverRepoBranch)}`,
-    'case "$ZBOT_FW_ROOT" in "~"|"~/"*) ZBOT_FW_ROOT="$HOME${ZBOT_FW_ROOT#~}" ;; esac',
+    'case "$ZBOT_FW_ROOT" in "~"|"~/"*) ZBOT_FW_ROOT="$HOME${ZBOT_FW_ROOT#\\~}" ;; esac',
     'echo "Zebra native C firmware setup root: $ZBOT_FW_ROOT"',
     'if command -v brew >/dev/null 2>&1; then',
     '  brew update',
@@ -2504,18 +2923,25 @@ function nativeLinuxSetupScript(buildRootSetting: string): string {
     '  exit 1',
     'fi',
     'mkdir -p "$ZBOT_FW_ROOT"',
-    `if [ ! -d "$ZBOT_FW_ROOT/micropython/.git" ]; then git clone --depth 1 --branch ${MICROPYTHON_TAG} https://github.com/micropython/micropython.git "$ZBOT_FW_ROOT/micropython"; fi`,
-    `if [ ! -d "$ZBOT_FW_ROOT/esp-idf/.git" ]; then git clone --depth 1 --branch ${ESP_IDF_TAG} --recursive https://github.com/espressif/esp-idf.git "$ZBOT_FW_ROOT/esp-idf"; fi`,
+    `if [ ! -d "$ZBOT_FW_ROOT/micropython/.git" ]; then git clone --depth 1 --filter=blob:none --branch ${MICROPYTHON_TAG} https://github.com/micropython/micropython.git "$ZBOT_FW_ROOT/micropython"; fi`,
+    `if [ ! -d "$ZBOT_FW_ROOT/esp-idf/.git" ]; then git clone --depth 1 --filter=blob:none --branch ${ESP_IDF_TAG} https://github.com/espressif/esp-idf.git "$ZBOT_FW_ROOT/esp-idf"; fi`,
     'if [ ! -d "$ZBOT_FW_ROOT/zbot-driver/.git" ]; then',
     '  if [ -n "$ZBOT_DRIVER_BRANCH" ]; then',
-    '    git clone --depth 1 --branch "$ZBOT_DRIVER_BRANCH" "$ZBOT_DRIVER_REPO" "$ZBOT_FW_ROOT/zbot-driver"',
+    '    git clone --depth 1 --filter=blob:none --no-checkout --branch "$ZBOT_DRIVER_BRANCH" "$ZBOT_DRIVER_REPO" "$ZBOT_FW_ROOT/zbot-driver"',
     '  else',
-    '    git clone --depth 1 "$ZBOT_DRIVER_REPO" "$ZBOT_FW_ROOT/zbot-driver"',
+    '    git clone --depth 1 --filter=blob:none --no-checkout "$ZBOT_DRIVER_REPO" "$ZBOT_FW_ROOT/zbot-driver"',
     '  fi',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" sparse-checkout init --cone',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" sparse-checkout set micropython/cmodules',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" checkout',
     'elif [ -n "$ZBOT_DRIVER_BRANCH" ]; then',
-    '  git -C "$ZBOT_FW_ROOT/zbot-driver" fetch --depth 1 origin "$ZBOT_DRIVER_BRANCH"',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" sparse-checkout init --cone',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" sparse-checkout set micropython/cmodules',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" fetch --depth 1 --filter=blob:none origin "$ZBOT_DRIVER_BRANCH"',
     '  git -C "$ZBOT_FW_ROOT/zbot-driver" checkout -B "$ZBOT_DRIVER_BRANCH" FETCH_HEAD',
     'else',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" sparse-checkout init --cone',
+    '  git -C "$ZBOT_FW_ROOT/zbot-driver" sparse-checkout set micropython/cmodules',
     '  git -C "$ZBOT_FW_ROOT/zbot-driver" pull --ff-only',
     'fi',
     'ZBOT_CMODULES="$ZBOT_FW_ROOT/zbot-driver/micropython/cmodules/micropython.cmake"',
@@ -2524,7 +2950,7 @@ function nativeLinuxSetupScript(buildRootSetting: string): string {
     '  echo "Check zebra.driverRepoUrl and zebra.driverRepoBranch, then run this command again."',
     '  exit 1',
     'fi',
-    'git -C "$ZBOT_FW_ROOT/esp-idf" submodule update --init --recursive',
+    'git -C "$ZBOT_FW_ROOT/esp-idf" submodule update --init --recursive --depth 1 --jobs 8 --recommend-shallow',
     'export IDF_TOOLS_PATH="$ZBOT_FW_ROOT/idf_tools"',
     '"$ZBOT_FW_ROOT/esp-idf/install.sh" esp32',
     '. "$ZBOT_FW_ROOT/esp-idf/export.sh"',
@@ -2685,6 +3111,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
         new ZebraTreeItem('Open a folder to start', 'No workspace', vscode.TreeItemCollapsibleState.None, 'info'),
         commandItem('Welcome', 'zebra.welcome', 'home'),
         commandItem('Project Setup', 'zebra.projectSetup', 'gear'),
+        commandItem('Sensor Calibration', 'zebra.openSensorCalibration', 'symbol-color'),
       ]);
     }
 
@@ -2700,6 +3127,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
       commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),
       commandItem('Deploy Project / User Program', 'zebra.deployProject', 'cloud-upload'),
       commandItem('Robot Simulator', 'zebra.openSimulator', 'debug-start'),
+      commandItem('Sensor Calibration', 'zebra.openSensorCalibration', 'symbol-color'),
       commandItem('Serial Monitor', 'zebra.openSerialMonitor', 'terminal'),
       commandItem('Flash Firmware', 'zebra.flashFirmware', 'zap'),
       commandItem('Robot Driver Docs', 'zebra.openDriverDocs', 'book'),
