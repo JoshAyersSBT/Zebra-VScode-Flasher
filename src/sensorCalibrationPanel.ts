@@ -97,29 +97,39 @@ export class SensorCalibrationPanel {
       async message => {
         try {
           if (message?.type === 'refresh') {
+            await this.panel.webview.postMessage({ type: 'busy', action: 'refresh', message: 'Refreshing workspace and robot status...' });
             await this.postState();
+            await this.panel.webview.postMessage({ type: 'idle', action: 'refresh' });
             return;
           }
 
           if (message?.type === 'capture') {
+            const sensorPort = Number(message.sensorPort || 1);
+            await this.panel.webview.postMessage({ type: 'busy', action: 'capture', message: `Connecting to robot and reading sensor port ${sensorPort}...` });
             const sample = await this.capture(Number(message.sensorPort || 1));
             await this.panel.webview.postMessage({ type: 'sample', sample });
+            await this.panel.webview.postMessage({ type: 'idle', action: 'capture' });
             return;
           }
 
           if (message?.type === 'save') {
+            await this.panel.webview.postMessage({ type: 'busy', action: 'save', message: 'Writing calibration files...' });
             await this.panel.webview.postMessage({ type: 'state', state: await this.save(message.data) });
             await this.panel.webview.postMessage({ type: 'notice', message: 'Calibration dictionary saved.' });
+            await this.panel.webview.postMessage({ type: 'idle', action: 'save' });
             return;
           }
 
           if (message?.type === 'upload') {
+            await this.panel.webview.postMessage({ type: 'busy', action: 'upload', message: 'Uploading calibration dictionary with mpremote...' });
             await this.panel.webview.postMessage({ type: 'state', state: await this.upload(message.data) });
             await this.panel.webview.postMessage({ type: 'notice', message: 'Calibration dictionary uploaded to robot.' });
+            await this.panel.webview.postMessage({ type: 'idle', action: 'upload' });
           }
         } catch (err: unknown) {
           const text = err instanceof Error ? err.message : String(err);
           await this.panel.webview.postMessage({ type: 'error', message: text });
+          await this.panel.webview.postMessage({ type: 'idle' });
         }
       },
       null,
@@ -174,6 +184,7 @@ export class SensorCalibrationPanel {
     header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
     .brand { font-weight: 700; margin-right: 8px; }
     .status { color: var(--muted); overflow-wrap: anywhere; }
+    .status.busy { color: var(--fg); }
     main { min-height: 0; display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); }
     aside { padding: 12px; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--panel), var(--bg) 18%); overflow: auto; }
     .content { padding: 12px; overflow: auto; }
@@ -182,6 +193,7 @@ export class SensorCalibrationPanel {
     button, select, input { font: inherit; }
     button { min-height: 30px; border: none; border-radius: 6px; padding: 6px 9px; color: var(--button-fg); background: var(--button); cursor: pointer; }
     button:hover { background: var(--button-hover); }
+    button:disabled { opacity: .65; cursor: wait; }
     button.secondary { color: var(--fg); background: transparent; border: 1px solid var(--border); }
     button.active { outline: 1px solid var(--accent); background: color-mix(in srgb, var(--button), transparent 20%); }
     label { color: var(--muted); font-size: 12px; }
@@ -198,6 +210,7 @@ export class SensorCalibrationPanel {
     .swatch.captured .badge { color: var(--ok); }
     .dictionary { width: 100%; min-height: 220px; padding: 8px; color: var(--fg); background: var(--input); border: 1px solid var(--border); border-radius: 6px; font-family: var(--vscode-editor-font-family); font-size: 12px; line-height: 1.35; white-space: pre; overflow: auto; }
     .log { min-height: 80px; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); background: var(--input); font-size: 12px; line-height: 1.35; }
+    .log-line { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 4px; }
     @media (max-width: 860px) {
       main { grid-template-columns: 1fr; }
       aside { border-right: 0; border-bottom: 1px solid var(--border); }
@@ -254,8 +267,18 @@ export class SensorCalibrationPanel {
     const sensorPortEl = document.getElementById('sensorPort');
     const colorNameEl = document.getElementById('colorName');
     const dictionaryEl = document.getElementById('dictionary');
+    const controls = [
+      document.getElementById('refreshBtn'),
+      document.getElementById('saveBtn'),
+      document.getElementById('uploadBtn'),
+      document.getElementById('captureBtn'),
+      document.getElementById('assignBtn'),
+      sensorPortEl,
+      colorNameEl,
+    ];
     let data = { version: 1, updatedAt: null, ports: {} };
     let lastSample = null;
+    let lastStatus = 'Loading...';
 
     for (const [name] of palette) {
       const option = document.createElement('option');
@@ -270,6 +293,8 @@ export class SensorCalibrationPanel {
       if (msg.type === 'sample') applySample(msg.sample);
       if (msg.type === 'notice') note(msg.message);
       if (msg.type === 'error') note(msg.message, true);
+      if (msg.type === 'busy') setBusy(true, msg.message);
+      if (msg.type === 'idle') setBusy(false);
     });
 
     document.getElementById('refreshBtn').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
@@ -283,7 +308,10 @@ export class SensorCalibrationPanel {
 
     function applyState(state) {
       data = normalizeData(state.data);
-      statusEl.textContent = (state.workspaceRoot || 'No workspace') + ' | Robot port: ' + (state.serialPort || 'not checked');
+      lastStatus = (state.workspaceRoot || 'No workspace') + ' | Robot port: ' + (state.serialPort || 'not checked');
+      if (!statusEl.classList.contains('busy')) {
+        statusEl.textContent = lastStatus;
+      }
       render();
     }
 
@@ -376,9 +404,21 @@ export class SensorCalibrationPanel {
 
     function note(text, isError) {
       const line = document.createElement('div');
+      line.className = 'log-line';
       line.textContent = new Date().toLocaleTimeString() + '  ' + text;
       if (isError) line.style.color = 'var(--danger)';
       logEl.prepend(line);
+    }
+
+    function setBusy(isBusy, message) {
+      for (const control of controls) {
+        control.disabled = isBusy;
+      }
+      statusEl.classList.toggle('busy', isBusy);
+      statusEl.textContent = isBusy ? (message || 'Working...') : lastStatus;
+      if (isBusy && message) {
+        note(message);
+      }
     }
 
     vscode.postMessage({ type: 'refresh' });

@@ -143,6 +143,7 @@ OLED_HEIGHT = _cfg("OLED_HEIGHT", 64)
 
 SENSOR_SCAN_PERIOD_MS = _cfg("SENSOR_SCAN_PERIOD_MS", 100)
 SENSOR_PORT_MODES = _cfg("SENSOR_PORT_MODES", {})
+SENSOR_PORT_CHANNELS = _cfg("SENSOR_PORT_CHANNELS", {})
 
 MOTOR_PORT_MAP = _cfg("MOTOR_PORT_MAP", {})
 ACTIVE_MOTOR_PORTS = _cfg("ACTIVE_MOTOR_PORTS", tuple(sorted(MOTOR_PORT_MAP.keys())))
@@ -1851,6 +1852,7 @@ async def main():
             port_modes=SENSOR_PORT_MODES,
             notify_fn=notify_fn,
             scan_period_ms=SENSOR_SCAN_PERIOD_MS,
+            port_channels=SENSOR_PORT_CHANNELS,
         )
         api.register_handle("sensor_hub", sensor_hub)
         info("BOOT: SensorHub initialized")

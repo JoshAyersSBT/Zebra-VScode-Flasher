@@ -587,17 +587,19 @@ async function captureSensorCalibrationSample(sensorPort: number): Promise<Senso
     '    import robot.config as cfg',
     '    i2c = I2C(getattr(cfg, "TCA_I2C_ID", 0), sda=Pin(getattr(cfg, "TCA_SDA_GPIO", 21)), scl=Pin(getattr(cfg, "TCA_SCL_GPIO", 22)), freq=getattr(cfg, "TCA_I2C_FREQ", 400000))',
     '    mux_addr = getattr(cfg, "TCA_ADDR", 0x70)',
-    '    channel = sensor_port',
+    '    default_channels = {1: 6, 2: 5, 3: 4, 4: 3, 5: 2, 6: 1}',
+    '    channel_map = getattr(cfg, "SENSOR_PORT_CHANNELS", default_channels)',
+    '    channel = int(channel_map.get(sensor_port, default_channels.get(sensor_port, sensor_port)))',
     '    if channel < 0 or channel > 7:',
-    '        raise RuntimeError("sensor port must map to mux channel 0..7")',
+    '        raise RuntimeError("sensor port {} mapped to invalid mux channel {}".format(sensor_port, channel))',
     '    try:',
     '        i2c.writeto(mux_addr, bytes([1 << channel]))',
     '        time.sleep_ms(60)',
     '    except Exception as e:',
-    '        raise RuntimeError("mux select failed: {}".format(e))',
+    '        raise RuntimeError("mux select failed for sensor port {} channel {}: {}".format(sensor_port, channel, e))',
     '    addrs = i2c.scan()',
     '    if 0x29 not in addrs:',
-    '        raise RuntimeError("no TCS3472 at port {}; scan={}".format(sensor_port, [hex(a) for a in addrs]))',
+    '        raise RuntimeError("no TCS3472 at sensor port {} mux channel {}; scan={}".format(sensor_port, channel, [hex(a) for a in addrs]))',
     '    chip_id = i2c.readfrom_mem(0x29, 0x92, 1)[0]',
     '    if chip_id not in (0x44, 0x4D):',
     '        raise RuntimeError("unexpected TCS3472 id {}".format(hex(chip_id)))',
@@ -641,18 +643,43 @@ async function captureSensorCalibrationSample(sensorPort: number): Promise<Senso
   const raw = await runMpremoteCommand(toolPython, port, ['exec', script]);
   const line = raw.split(/\r?\n/).find(item => item.includes(marker));
   if (!line) {
-    throw new Error(`Could not read color sample from robot.\n\n${raw}`);
+    throw new Error(
+      [
+        `Could not read color sample from robot on ${port}, sensor port ${sensorPortInt}.`,
+        'The robot did not return the expected calibration marker.',
+        raw.trim() ? `mpremote output:\n${raw.trim()}` : 'mpremote returned no output.',
+      ].join('\n\n'),
+    );
   }
 
-  const parsed = JSON.parse(line.slice(line.indexOf(marker) + marker.length)) as {
+  type ColorSampleResponse = {
     ok: boolean;
     error?: string;
     rgb?: { r?: number; g?: number; b?: number; clear?: number };
     normalized?: { r?: number; g?: number; b?: number };
   };
+  let parsed: ColorSampleResponse;
+  try {
+    parsed = JSON.parse(line.slice(line.indexOf(marker) + marker.length)) as ColorSampleResponse;
+  } catch (err: unknown) {
+    throw new Error(
+      [
+        `Could not parse color sample response from robot on ${port}, sensor port ${sensorPortInt}.`,
+        `Parse error: ${err instanceof Error ? err.message : String(err)}`,
+        `Robot response line:\n${line}`,
+        raw.trim() ? `mpremote output:\n${raw.trim()}` : '',
+      ].filter(Boolean).join('\n\n'),
+    );
+  }
 
   if (!parsed.ok || !parsed.rgb || !parsed.normalized) {
-    throw new Error(parsed.error || 'No color sensor reading available.');
+    throw new Error(
+      [
+        `No color sensor reading available from ${port}, sensor port ${sensorPortInt}.`,
+        parsed.error ? `Robot reported: ${parsed.error}` : '',
+        raw.trim() ? `mpremote output:\n${raw.trim()}` : '',
+      ].filter(Boolean).join('\n\n'),
+    );
   }
 
   return {
@@ -687,6 +714,7 @@ async function uploadSensorCalibrationData(data: SensorCalibrationData): Promise
   const toolPython = await ensureToolPython();
   const port = await resolveSerialPort(toolPython);
 
+  output.appendLine(`Uploading sensor calibration dictionary to ${port}: ${pythonFile}`);
   await runMpremoteCommand(toolPython, port, ['fs', 'mkdir', ':robot'], true);
   await runMpremoteCommand(toolPython, port, ['fs', 'cp', pythonFile, ':robot/color_calibration.py']);
   await runMpremoteCommand(toolPython, port, ['reset'], true);
@@ -2999,7 +3027,7 @@ function runCommand(command: string, args: string[], ignoreFailure = false): Pro
 
     child.on('close', (code: number | null) => {
       if (code !== 0 && !ignoreFailure) {
-        reject(new Error(`Command failed with code ${code}: ${command} ${args.join(' ')}\n${stderr}`));
+        reject(new Error(formatCommandFailure(code, command, args.join(' '), stdout, stderr)));
         return;
       }
       resolve(stdout.trim());
@@ -3054,7 +3082,7 @@ function runCommandWithInput(command: string, args: string[], input: string, log
 
     child.on('close', (code: number | null) => {
       if (code !== 0 && !ignoreFailure) {
-        reject(new Error(`Command failed with code ${code}: ${logLine}\n${stderr}`));
+        reject(new Error(formatCommandFailure(code, command, logLine, stdout, stderr)));
         return;
       }
       resolve(stdout.trim());
@@ -3062,6 +3090,14 @@ function runCommandWithInput(command: string, args: string[], input: string, log
 
     child.stdin.end(input);
   });
+}
+
+function formatCommandFailure(code: number | null, command: string, commandLine: string, stdout: string, stderr: string): string {
+  return [
+    `Command failed with code ${code}: ${commandLine || command}`,
+    stdout.trim() ? `stdout:\n${stdout.trim()}` : '',
+    stderr.trim() ? `stderr:\n${stderr.trim()}` : '',
+  ].filter(Boolean).join('\n\n');
 }
 
 function starterMainPy(): string {

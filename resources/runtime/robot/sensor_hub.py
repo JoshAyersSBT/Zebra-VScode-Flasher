@@ -57,10 +57,12 @@ class SensorHub:
         port_modes,
         notify_fn,
         scan_period_ms=100,
+        port_channels=None,
     ):
         self.i2c = I2C(i2c_id, sda=Pin(sda_gpio), scl=Pin(scl_gpio), freq=freq)
         self.mux = mux
         self.port_modes = dict(port_modes)
+        self.port_channels = dict(port_channels or {})
         self.notify = notify_fn
         self.scan_period_ms = int(scan_period_ms)
 
@@ -89,6 +91,7 @@ class SensorHub:
                 "value": state_name if state_name is not None else "unknown",
                 "meta": {
                     "port": port,
+                    "mux_channel": self._channel_for_port(port),
                     "addrs": [int(a) for a in addrs] if addrs else [],
                 },
             }
@@ -126,7 +129,10 @@ class SensorHub:
     def _select(self, port):
         if self.mux is None:
             raise RuntimeError("SensorHub has no mux")
-        self.mux.select(int(port))
+        self.mux.select(self._channel_for_port(port))
+
+    def _channel_for_port(self, port):
+        return int(self.port_channels.get(int(port), int(port)))
 
     def _notify(self, line):
         try:
