@@ -7,16 +7,30 @@ export interface SensorCalibrationEntry {
   capturedAt: string;
 }
 
+export interface TofCalibrationEntry {
+  label: string;
+  actualMm: number;
+  measuredMm: number;
+  capturedAt: string;
+}
+
 export interface SensorCalibrationData {
   version: number;
   updatedAt: string | null;
   ports: Record<string, SensorCalibrationEntry[]>;
+  tofPorts?: Record<string, TofCalibrationEntry[]>;
 }
 
 export interface SensorCalibrationSample {
   port: number;
   rgb: { r: number; g: number; b: number; clear: number };
   normalized: { r: number; g: number; b: number };
+}
+
+export interface TofCalibrationSample {
+  port: number;
+  distanceMm: number;
+  rawDistanceMm?: number;
 }
 
 export interface SensorCalibrationState {
@@ -26,7 +40,7 @@ export interface SensorCalibrationState {
 }
 
 type StateProvider = () => Promise<SensorCalibrationState>;
-type CaptureHandler = (sensorPort: number) => Promise<SensorCalibrationSample>;
+type CaptureHandler = (sensorPort: number, sensorKind?: 'color' | 'tof') => Promise<SensorCalibrationSample | TofCalibrationSample>;
 type SaveHandler = (data: SensorCalibrationData) => Promise<SensorCalibrationState>;
 type UploadHandler = (data: SensorCalibrationData) => Promise<SensorCalibrationState>;
 
@@ -105,9 +119,10 @@ export class SensorCalibrationPanel {
 
           if (message?.type === 'capture') {
             const sensorPort = Number(message.sensorPort || 1);
-            await this.panel.webview.postMessage({ type: 'busy', action: 'capture', message: `Connecting to robot and reading sensor port ${sensorPort}...` });
-            const sample = await this.capture(Number(message.sensorPort || 1));
-            await this.panel.webview.postMessage({ type: 'sample', sample });
+            const sensorKind = message.sensorKind === 'tof' ? 'tof' : 'color';
+            await this.panel.webview.postMessage({ type: 'busy', action: 'capture', message: `Connecting to robot and reading ${sensorKind.toUpperCase()} sensor port ${sensorPort}...` });
+            const sample = await this.capture(sensorPort, sensorKind);
+            await this.panel.webview.postMessage({ type: sensorKind === 'tof' ? 'tofSample' : 'sample', sample });
             await this.panel.webview.postMessage({ type: 'idle', action: 'capture' });
             return;
           }
@@ -200,6 +215,9 @@ export class SensorCalibrationPanel {
     input, select { width: 100%; color: var(--fg); background: var(--input); border: 1px solid var(--border); border-radius: 6px; padding: 6px 7px; }
     .row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px; align-items: center; margin: 8px 0; }
     .actions { display: flex; flex-wrap: wrap; gap: 7px; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+    .tab { flex: 1; }
+    .mode-panel[hidden] { display: none; }
     .hint { color: var(--muted); font-size: 12px; line-height: 1.45; }
     .sample { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--input); font-size: 12px; }
     .palette { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; }
@@ -229,15 +247,26 @@ export class SensorCalibrationPanel {
     <main>
       <aside>
         <section>
+          <div class="tabs">
+            <button id="colorModeBtn" class="tab active">Color</button>
+            <button id="tofModeBtn" class="tab secondary">TOF</button>
+          </div>
           <h2>Capture</h2>
           <div class="row"><label for="sensorPort">Sensor port</label><select id="sensorPort"><option value="1">Port 1</option><option value="2">Port 2</option><option value="3">Port 3</option><option value="4">Port 4</option><option value="5">Port 5</option><option value="6">Port 6</option></select></div>
-          <div class="row"><label for="colorName">Palette color</label><select id="colorName"></select></div>
+          <div id="colorControls" class="mode-panel">
+            <div class="row"><label for="colorName">Palette color</label><select id="colorName"></select></div>
+          </div>
+          <div id="tofControls" class="mode-panel" hidden>
+            <div class="row"><label for="tofActualMm">Actual mm</label><input id="tofActualMm" type="number" min="1" max="4000" step="1" value="100" /></div>
+            <div class="row"><label for="tofLabel">Label</label><input id="tofLabel" type="text" value="100 mm" /></div>
+          </div>
           <div id="sample" class="sample"><span>No real sensor sample captured yet.</span></div>
           <div class="actions" style="margin-top: 8px;">
             <button id="captureBtn">Capture Reading</button>
             <button id="assignBtn" class="secondary">Assign To Color</button>
+            <button id="assignTofBtn" class="secondary" hidden>Add TOF Point</button>
           </div>
-          <p class="hint">Point the real color sensor at the selected color, capture the reading, then assign it. Repeat for as many of the 32 colors as the class needs.</p>
+          <p id="modeHint" class="hint">Point the real color sensor at the selected color, capture the reading, then assign it. Repeat for as many of the 32 colors as the class needs.</p>
         </section>
         <section>
           <h2>Log</h2>
@@ -248,6 +277,10 @@ export class SensorCalibrationPanel {
         <section>
           <h2>32 Color Dictionary</h2>
           <div id="palette" class="palette"></div>
+        </section>
+        <section>
+          <h2>TOF Calibration Points</h2>
+          <div id="tofList" class="palette"></div>
         </section>
         <section>
           <h2>Generated robot/color_calibration.py</h2>
@@ -266,18 +299,32 @@ export class SensorCalibrationPanel {
     const sampleEl = document.getElementById('sample');
     const sensorPortEl = document.getElementById('sensorPort');
     const colorNameEl = document.getElementById('colorName');
+    const tofActualMmEl = document.getElementById('tofActualMm');
+    const tofLabelEl = document.getElementById('tofLabel');
     const dictionaryEl = document.getElementById('dictionary');
+    const colorControlsEl = document.getElementById('colorControls');
+    const tofControlsEl = document.getElementById('tofControls');
+    const modeHintEl = document.getElementById('modeHint');
+    const assignBtn = document.getElementById('assignBtn');
+    const assignTofBtn = document.getElementById('assignTofBtn');
+    const colorModeBtn = document.getElementById('colorModeBtn');
+    const tofModeBtn = document.getElementById('tofModeBtn');
     const controls = [
       document.getElementById('refreshBtn'),
       document.getElementById('saveBtn'),
       document.getElementById('uploadBtn'),
       document.getElementById('captureBtn'),
       document.getElementById('assignBtn'),
+      assignTofBtn,
       sensorPortEl,
       colorNameEl,
+      tofActualMmEl,
+      tofLabelEl,
     ];
-    let data = { version: 1, updatedAt: null, ports: {} };
+    let data = { version: 1, updatedAt: null, ports: {}, tofPorts: {} };
+    let mode = 'color';
     let lastSample = null;
+    let lastTofSample = null;
     let lastStatus = 'Loading...';
 
     for (const [name] of palette) {
@@ -291,6 +338,7 @@ export class SensorCalibrationPanel {
       const msg = event.data;
       if (msg.type === 'state') applyState(msg.state);
       if (msg.type === 'sample') applySample(msg.sample);
+      if (msg.type === 'tofSample') applyTofSample(msg.sample);
       if (msg.type === 'notice') note(msg.message);
       if (msg.type === 'error') note(msg.message, true);
       if (msg.type === 'busy') setBusy(true, msg.message);
@@ -299,12 +347,33 @@ export class SensorCalibrationPanel {
 
     document.getElementById('refreshBtn').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
     document.getElementById('captureBtn').addEventListener('click', () => {
-      vscode.postMessage({ type: 'capture', sensorPort: Number(sensorPortEl.value) });
+      vscode.postMessage({ type: 'capture', sensorPort: Number(sensorPortEl.value), sensorKind: mode });
     });
     document.getElementById('assignBtn').addEventListener('click', assignSample);
+    assignTofBtn.addEventListener('click', assignTofSample);
     document.getElementById('saveBtn').addEventListener('click', () => vscode.postMessage({ type: 'save', data }));
     document.getElementById('uploadBtn').addEventListener('click', () => vscode.postMessage({ type: 'upload', data }));
     sensorPortEl.addEventListener('change', render);
+    colorModeBtn.addEventListener('click', () => setMode('color'));
+    tofModeBtn.addEventListener('click', () => setMode('tof'));
+    tofActualMmEl.addEventListener('input', () => {
+      if (!tofLabelEl.value.trim()) tofLabelEl.value = String(tofActualMmEl.value || '') + ' mm';
+    });
+
+    function setMode(nextMode) {
+      mode = nextMode === 'tof' ? 'tof' : 'color';
+      colorControlsEl.hidden = mode !== 'color';
+      tofControlsEl.hidden = mode !== 'tof';
+      assignBtn.hidden = mode !== 'color';
+      assignTofBtn.hidden = mode !== 'tof';
+      colorModeBtn.className = 'tab' + (mode === 'color' ? ' active' : ' secondary');
+      tofModeBtn.className = 'tab' + (mode === 'tof' ? ' active' : ' secondary');
+      modeHintEl.textContent = mode === 'tof'
+        ? 'Place a target at the known distance, capture the raw TOF reading, then add the reference point. Add two or more points for interpolation.'
+        : 'Point the real color sensor at the selected color, capture the reading, then assign it. Repeat for as many of the 32 colors as the class needs.';
+      sampleEl.innerHTML = '<span>No real sensor sample captured yet.</span>';
+      render();
+    }
 
     function applyState(state) {
       data = normalizeData(state.data);
@@ -322,6 +391,15 @@ export class SensorCalibrationPanel {
       sampleEl.children[1].textContent = 'RGB ' + sample.rgb.r + ', ' + sample.rgb.g + ', ' + sample.rgb.b + ' | clear ' + sample.rgb.clear;
       sampleEl.children[2].textContent = 'Normalized ' + sample.normalized.r + ', ' + sample.normalized.g + ', ' + sample.normalized.b;
       note('Captured Port ' + sample.port + ' reading.');
+    }
+
+    function applyTofSample(sample) {
+      lastTofSample = sample;
+      sampleEl.innerHTML = '<strong></strong><span></span><span></span>';
+      sampleEl.children[0].textContent = 'Captured from Port ' + sample.port;
+      sampleEl.children[1].textContent = 'Measured distance ' + sample.distanceMm + ' mm';
+      sampleEl.children[2].textContent = sample.rawDistanceMm == null ? 'Raw reading stored' : 'Raw ' + sample.rawDistanceMm + ' mm';
+      note('Captured Port ' + sample.port + ' TOF reading.');
     }
 
     function assignSample() {
@@ -345,8 +423,35 @@ export class SensorCalibrationPanel {
       vscode.postMessage({ type: 'save', data });
     }
 
+    function assignTofSample() {
+      if (!lastTofSample) {
+        note('Capture a real TOF reading first.', true);
+        return;
+      }
+      const actualMm = Math.max(1, Math.floor(Number(tofActualMmEl.value) || 0));
+      if (!actualMm) {
+        note('Enter the actual target distance in millimeters.', true);
+        return;
+      }
+      const port = String(lastTofSample.port);
+      const entries = data.tofPorts[port] || [];
+      const label = (tofLabelEl.value || '').trim() || (actualMm + ' mm');
+      const entry = {
+        label,
+        actualMm,
+        measuredMm: Math.max(0, Math.floor(Number(lastTofSample.rawDistanceMm || lastTofSample.distanceMm) || 0)),
+        capturedAt: new Date().toISOString(),
+      };
+      data.tofPorts[port] = [entry, ...entries.filter(item => item.label !== label && item.actualMm !== actualMm)];
+      data.updatedAt = new Date().toISOString();
+      note('Added Port ' + port + ' TOF point: raw ' + entry.measuredMm + ' mm -> actual ' + actualMm + ' mm. Saving dictionary...');
+      render();
+      vscode.postMessage({ type: 'save', data });
+    }
+
     function render() {
       renderPalette();
+      renderTofList();
       dictionaryEl.textContent = generatePython(data);
     }
 
@@ -372,6 +477,30 @@ export class SensorCalibrationPanel {
       }
     }
 
+    function renderTofList() {
+      const el = document.getElementById('tofList');
+      el.innerHTML = '';
+      const port = sensorPortEl.value;
+      const entries = (data.tofPorts[port] || []).slice().sort((a, b) => a.measuredMm - b.measuredMm);
+      if (!entries.length) {
+        const empty = document.createElement('div');
+        empty.className = 'sample';
+        empty.textContent = 'No TOF points for Port ' + port + ' yet.';
+        el.appendChild(empty);
+        return;
+      }
+      for (const entry of entries) {
+        const item = document.createElement('button');
+        item.className = 'swatch';
+        item.innerHTML = '<span class="chip"></span><span class="name"></span><span class="badge"></span>';
+        item.children[0].style.background = 'var(--accent)';
+        item.children[1].textContent = entry.label || (entry.actualMm + ' mm');
+        item.children[2].textContent = entry.measuredMm + ' -> ' + entry.actualMm;
+        item.title = 'Raw measured mm -> actual mm';
+        el.appendChild(item);
+      }
+    }
+
     function normalizeData(value) {
       const next = value && typeof value === 'object' ? value : {};
       const ports = next.ports && typeof next.ports === 'object' ? next.ports : {};
@@ -379,6 +508,7 @@ export class SensorCalibrationPanel {
         version: 1,
         updatedAt: next.updatedAt || null,
         ports,
+        tofPorts: next.tofPorts && typeof next.tofPorts === 'object' ? next.tofPorts : {},
       };
     }
 
@@ -392,6 +522,17 @@ export class SensorCalibrationPanel {
         lines.push('    ' + port + ': [');
         for (const entry of value.ports[port]) {
           lines.push('        {"color": "' + escapePy(entry.color) + '", "rgb": {"r": ' + entry.rgb.r + ', "g": ' + entry.rgb.g + ', "b": ' + entry.rgb.b + ', "clear": ' + entry.rgb.clear + '}, "normalized": {"r": ' + entry.normalized.r + ', "g": ' + entry.normalized.g + ', "b": ' + entry.normalized.b + '}},');
+        }
+        lines.push('    ],');
+      }
+      lines.push('}');
+      lines.push('');
+      lines.push('TOF_CALIBRATIONS = {');
+      const tofPorts = value.tofPorts || {};
+      for (const port of Object.keys(tofPorts).sort((a, b) => Number(a) - Number(b))) {
+        lines.push('    ' + port + ': [');
+        for (const entry of tofPorts[port]) {
+          lines.push('        {"label": "' + escapePy(entry.label || '') + '", "measured_mm": ' + Math.floor(Number(entry.measuredMm) || 0) + ', "actual_mm": ' + Math.floor(Number(entry.actualMm) || 0) + '},');
         }
         lines.push('    ],');
       }

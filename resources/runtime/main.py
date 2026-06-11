@@ -105,6 +105,38 @@ def _load_color_calibrations():
     return out
 
 
+def _load_tof_calibrations():
+    try:
+        from robot.color_calibration import TOF_CALIBRATIONS
+    except Exception:
+        return {}
+
+    out = {}
+    try:
+        for port, entries in TOF_CALIBRATIONS.items():
+            port_i = int(port)
+            normalized_entries = []
+            if isinstance(entries, (list, tuple)):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    measured = int(entry.get("measured_mm", entry.get("measuredMm", 0)))
+                    actual = int(entry.get("actual_mm", entry.get("actualMm", 0)))
+                    if measured <= 0 or actual <= 0:
+                        continue
+                    normalized_entries.append({
+                        "label": str(entry.get("label", "{} mm".format(actual))),
+                        "measured_mm": measured,
+                        "actual_mm": actual,
+                    })
+            normalized_entries.sort(key=lambda item: item["measured_mm"])
+            out[port_i] = normalized_entries
+    except Exception:
+        return {}
+
+    return out
+
+
 def _cfg(name, default=None):
     return getattr(robot_config, name, default)
 
@@ -267,6 +299,7 @@ class RobotAPI:
             "imu": {},
             "sensors": {},
             "color_calibrations": _load_color_calibrations(),
+            "tof_calibrations": _load_tof_calibrations(),
             "buttons": {},
             "services": {},
             "user": {
@@ -664,6 +697,9 @@ class _ZBotSensor:
 
         return None
 
+    def _find_raw_tof_value(self):
+        return self._find_snapshot_value()
+
     def _find_color_item(self):
         if self.api is None:
             return None
@@ -700,7 +736,13 @@ class _ZBotSensor:
         return None
 
     def read(self):
-        return self._find_snapshot_value()
+        value = self._find_snapshot_value()
+        if value is None:
+            return None
+        return _calibrate_tof_distance(self.api, self.port, value)
+
+    def read_raw(self):
+        return self._find_raw_tof_value()
 
     def rgb(self):
         item = self._find_color_item()
@@ -818,6 +860,59 @@ def _match_calibrated_color(api, port, rgb):
         "normalized": normalized,
         "distance": best_distance,
     }
+
+
+def _calibrate_tof_distance(api, port, measured_mm):
+    if api is None or measured_mm is None:
+        return measured_mm
+
+    try:
+        measured = int(measured_mm)
+    except Exception:
+        return measured_mm
+
+    entries = api.status.get("tof_calibrations", {}).get(int(port), [])
+    if not entries:
+        return measured
+
+    points = []
+    for entry in entries:
+        try:
+            raw = int(entry.get("measured_mm", 0))
+            actual = int(entry.get("actual_mm", 0))
+        except Exception:
+            continue
+        if raw > 0 and actual > 0:
+            points.append((raw, actual))
+
+    if not points:
+        return measured
+
+    points.sort(key=lambda item: item[0])
+    if len(points) == 1:
+        raw, actual = points[0]
+        return max(0, measured + (actual - raw))
+
+    if measured <= points[0][0]:
+        left, right = points[0], points[1]
+    elif measured >= points[-1][0]:
+        left, right = points[-2], points[-1]
+    else:
+        left = points[0]
+        right = points[-1]
+        for index in range(1, len(points)):
+            if measured <= points[index][0]:
+                left = points[index - 1]
+                right = points[index]
+                break
+
+    raw_span = right[0] - left[0]
+    actual_span = right[1] - left[1]
+    if raw_span == 0:
+        return max(0, measured + (left[1] - left[0]))
+
+    corrected = left[1] + ((measured - left[0]) * actual_span) // raw_span
+    return max(0, int(corrected))
 
 
 class _ZBotServo:
@@ -985,6 +1080,10 @@ class ZBot:
         s = self.sensor(port)
         return s.read()
 
+    def tof_raw(self, port):
+        s = self.sensor(port)
+        return s.read_raw()
+
     def color(self, port):
         s = self.sensor(port)
         return s.color()
@@ -1027,6 +1126,37 @@ class ZBot:
             value["normalized"] = normalized
             self.api.publish_sensor("color_port_{}".format(port), value, item.get("meta"))
 
+        return entry
+
+    def calibrate_tof(self, port, actual_mm, label=None):
+        if self.api is None:
+            return None
+
+        port = int(port)
+        sensor = self.sensor(port)
+        measured = sensor.read_raw()
+        if measured is None:
+            return None
+
+        actual = int(actual_mm)
+        if actual <= 0:
+            return None
+
+        calibrations = self.api.status.setdefault("tof_calibrations", {})
+        entries = calibrations.setdefault(port, [])
+        label_s = str(label or "{} mm".format(actual))
+        entries[:] = [
+            entry for entry in entries
+            if int(entry.get("actual_mm", -1)) != actual and str(entry.get("label", "")) != label_s
+        ]
+        entry = {
+            "label": label_s,
+            "measured_mm": int(measured),
+            "actual_mm": actual,
+            "ts_ms": time.ticks_ms(),
+        }
+        entries.append(entry)
+        entries.sort(key=lambda item: int(item.get("measured_mm", 0)))
         return entry
 
     def status(self):

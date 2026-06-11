@@ -25,6 +25,7 @@ import {
   SensorCalibrationPanel,
   SensorCalibrationSample,
   SensorCalibrationState,
+  TofCalibrationSample,
 } from './sensorCalibrationPanel';
 
 const REQUIRED_PYTHON_PACKAGES = ['pyserial', 'mpremote', 'esptool', 'bleak'];
@@ -550,7 +551,11 @@ async function getSensorCalibrationState(): Promise<SensorCalibrationState> {
   };
 }
 
-async function captureSensorCalibrationSample(sensorPort: number): Promise<SensorCalibrationSample> {
+async function captureSensorCalibrationSample(sensorPort: number, sensorKind: 'color' | 'tof' = 'color'): Promise<SensorCalibrationSample | TofCalibrationSample> {
+  if (sensorKind === 'tof') {
+    return captureTofCalibrationSample(sensorPort);
+  }
+
   const toolPython = await ensureToolPython();
   const port = await resolveSerialPort(toolPython);
   const sensorPortInt = Math.max(1, Math.min(6, Math.floor(Number(sensorPort) || 1)));
@@ -709,6 +714,117 @@ async function captureSensorCalibrationSample(sensorPort: number): Promise<Senso
       g: Number(parsed.normalized.g || 0),
       b: Number(parsed.normalized.b || 0),
     },
+  };
+}
+
+async function captureTofCalibrationSample(sensorPort: number): Promise<TofCalibrationSample> {
+  const toolPython = await ensureToolPython();
+  const port = await resolveSerialPort(toolPython);
+  const sensorPortInt = Math.max(1, Math.min(6, Math.floor(Number(sensorPort) || 1)));
+  const marker = '__ZEBRA_TOF_SAMPLE__';
+  const script = [
+    'try:',
+    '    import ujson as json',
+    'except Exception:',
+    '    import json',
+    'import sys, time',
+    `sensor_port = ${sensorPortInt}`,
+    'distance = None',
+    'err = None',
+    'def find_runtime():',
+    '    for name in ("__main__", "main", "robot.runtime"):',
+    '        module = sys.modules.get(name)',
+    '        if module is None:',
+    '            continue',
+    '        z = getattr(module, "zbot", None)',
+    '        api = getattr(module, "API", None)',
+    '        if z is None:',
+    '            getter = getattr(module, "get_zbot", None)',
+    '            if getter is not None:',
+    '                try:',
+    '                    z = getter()',
+    '                except Exception:',
+    '                    z = None',
+    '        if api is None:',
+    '            getter = getattr(module, "get_api", None)',
+    '            if getter is not None:',
+    '                try:',
+    '                    api = getter()',
+    '                except Exception:',
+    '                    api = None',
+    '        if z is not None or api is not None:',
+    '            return z, api',
+    '    return None, None',
+    'def sample_from_snapshot(api):',
+    '    if api is None:',
+    '        return None',
+    '    sensors = api.get_sensor_snapshot()',
+    '    item = sensors.get("tof_port_{}".format(sensor_port))',
+    '    if isinstance(item, dict):',
+    '        value = item.get("value")',
+    '        if isinstance(value, (int, float)):',
+    '            return int(value)',
+    '    return None',
+    'for _ in range(20):',
+    '    try:',
+    '        zbot, api = find_runtime()',
+    '        distance = sample_from_snapshot(api)',
+    '        if distance is None and zbot is not None:',
+    '            distance = zbot.tof(sensor_port)',
+    '    except Exception as e:',
+    '        err = str(e)',
+    '        distance = None',
+    '    if isinstance(distance, (int, float)) and int(distance) > 0:',
+    '        distance = int(distance)',
+    '        break',
+    '    time.sleep_ms(120)',
+    'if distance is None:',
+    '    print("' + marker + '" + json.dumps({"ok": False, "error": err or "No TOF reading available"}))',
+    'else:',
+    '    print("' + marker + '" + json.dumps({"ok": True, "distance_mm": int(distance)}))',
+  ].join('\n');
+
+  const raw = await runMpremoteCommand(toolPython, port, ['exec', script]);
+  const line = raw.split(/\r?\n/).find(item => item.includes(marker));
+  if (!line) {
+    throw new Error(
+      [
+        `Could not read TOF sample from robot on ${port}, sensor port ${sensorPortInt}.`,
+        'The robot did not return the expected calibration marker.',
+        raw.trim() ? `mpremote output:\n${raw.trim()}` : 'mpremote returned no output.',
+      ].join('\n\n'),
+    );
+  }
+
+  type TofSampleResponse = { ok: boolean; error?: string; distance_mm?: number };
+  let parsed: TofSampleResponse;
+  try {
+    parsed = JSON.parse(line.slice(line.indexOf(marker) + marker.length)) as TofSampleResponse;
+  } catch (err: unknown) {
+    throw new Error(
+      [
+        `Could not parse TOF sample response from robot on ${port}, sensor port ${sensorPortInt}.`,
+        `Parse error: ${err instanceof Error ? err.message : String(err)}`,
+        `Robot response line:\n${line}`,
+        raw.trim() ? `mpremote output:\n${raw.trim()}` : '',
+      ].filter(Boolean).join('\n\n'),
+    );
+  }
+
+  if (!parsed.ok || !parsed.distance_mm) {
+    throw new Error(
+      [
+        `No TOF reading available from ${port}, sensor port ${sensorPortInt}.`,
+        parsed.error ? `Robot reported: ${parsed.error}` : '',
+        raw.trim() ? `mpremote output:\n${raw.trim()}` : '',
+      ].filter(Boolean).join('\n\n'),
+    );
+  }
+
+  return {
+    port: sensorPortInt,
+    distanceMm: Math.max(0, Math.floor(Number(parsed.distance_mm) || 0)),
+    rawDistanceMm: Math.max(0, Math.floor(Number(parsed.distance_mm) || 0)),
   };
 }
 
@@ -1964,6 +2080,7 @@ function emptySensorCalibrationData(): SensorCalibrationData {
     version: 1,
     updatedAt: null,
     ports: {},
+    tofPorts: {},
   };
 }
 
@@ -2017,6 +2134,21 @@ function normalizeSensorCalibrationData(data: SensorCalibrationData): SensorCali
       }));
   }
 
+  const tofPorts = data?.tofPorts && typeof data.tofPorts === 'object' ? data.tofPorts : {};
+  normalized.tofPorts = {};
+  for (const [port, entries] of Object.entries(tofPorts)) {
+    const portKey = String(Math.max(1, Math.min(6, Math.floor(Number(port) || 1))));
+    if (!Array.isArray(entries)) continue;
+    normalized.tofPorts[portKey] = entries
+      .filter(entry => entry && Number(entry.actualMm) > 0 && Number(entry.measuredMm) > 0)
+      .map(entry => ({
+        label: String(entry.label || `${Math.floor(Number(entry.actualMm) || 0)} mm`),
+        actualMm: Math.max(1, Math.floor(Number(entry.actualMm) || 0)),
+        measuredMm: Math.max(1, Math.floor(Number(entry.measuredMm) || 0)),
+        capturedAt: entry.capturedAt || new Date().toISOString(),
+      }));
+  }
+
   return normalized;
 }
 
@@ -2042,6 +2174,22 @@ function sensorCalibrationPython(data: SensorCalibrationData): string {
         `        {"color": "${escapePythonString(entry.color)}", ` +
         `"rgb": {"r": ${entry.rgb.r}, "g": ${entry.rgb.g}, "b": ${entry.rgb.b}, "clear": ${entry.rgb.clear}}, ` +
         `"normalized": {"r": ${entry.normalized.r}, "g": ${entry.normalized.g}, "b": ${entry.normalized.b}}},`
+      );
+    }
+    lines.push('    ],');
+  }
+
+  lines.push('}');
+  lines.push('');
+  lines.push('TOF_CALIBRATIONS = {');
+
+  const tofPorts = data.tofPorts || {};
+  for (const port of Object.keys(tofPorts).sort((a, b) => Number(a) - Number(b))) {
+    lines.push(`    ${Number(port)}: [`);
+    for (const entry of tofPorts[port]) {
+      lines.push(
+        `        {"label": "${escapePythonString(entry.label)}", ` +
+        `"measured_mm": ${entry.measuredMm}, "actual_mm": ${entry.actualMm}},`
       );
     }
     lines.push('    ],');
