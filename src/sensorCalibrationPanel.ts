@@ -340,8 +340,9 @@ export class SensorCalibrationPanel {
       };
       data.ports[port] = [entry, ...entries.filter(item => item.color !== color)];
       data.updatedAt = new Date().toISOString();
-      note('Assigned Port ' + port + ' reading to ' + color + '.');
+      note('Assigned Port ' + port + ' reading to ' + color + '. Saving dictionary...');
       render();
+      vscode.postMessage({ type: 'save', data });
     }
 
     function render() {
