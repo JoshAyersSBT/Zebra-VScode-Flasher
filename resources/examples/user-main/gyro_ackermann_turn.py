@@ -1,3 +1,6 @@
+# Zebra Example: Gyro Ackermann Turn
+# Uses the IMU gyro and Ackermann drive helper to drive a measured turn.
+
 import time
 import uasyncio as asyncio
 from robot.ackermann import AckermannDrive
