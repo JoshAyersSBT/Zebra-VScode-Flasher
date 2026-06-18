@@ -20,6 +20,7 @@ const ACTIONS: Record<string, Action[]> = {
   ],
   Upload: [
     { label: 'Deploy Project', command: 'zebra.deployProject', icon: 'cloud-upload' },
+    { label: 'Full Overwrite Flash', command: 'zebra.deployProjectFullOverwrite', icon: 'zap' },
     { label: 'Flash Firmware', command: 'zebra.flashFirmware', icon: 'zap' }
   ],
   Toolchain: [

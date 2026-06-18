@@ -114,6 +114,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   registerCommand(context, 'zebra.detectSerialPort', detectSerialPortCommand, true);
   registerCommand(context, 'zebra.deployProject', deployProjectCommand, true);
+  registerCommand(context, 'zebra.deployProjectFullOverwrite', deployProjectFullOverwriteCommand, true);
   registerCommand(context, 'zebra.flashFirmware', flashFirmwareCommand, true);
   registerCommand(context, 'zebra.resetDevice', resetDeviceCommand, true);
   registerCommand(context, 'zebra.openSerialMonitor', openSerialMonitorCommand, true);
@@ -946,13 +947,23 @@ async function listUserMainExamples(): Promise<UserMainExample[]> {
 }
 
 async function deployProjectCommand(): Promise<void> {
+  await deployProject({ fullOverwrite: false });
+}
+
+async function deployProjectFullOverwriteCommand(): Promise<void> {
+  await deployProject({ fullOverwrite: true });
+}
+
+async function deployProject(options: { fullOverwrite: boolean }): Promise<void> {
   const root = await requireUsableProject();
   if (!root) {
     return;
   }
 
   const toolPython = await ensureToolPython();
-  const deployTransport = normalizeDeployTransport(getWorkspaceConfig<string>('deployTransport', 'serial').trim().toLowerCase());
+  const deployTransport = options.fullOverwrite
+    ? 'serial'
+    : normalizeDeployTransport(getWorkspaceConfig<string>('deployTransport', 'serial').trim().toLowerCase());
 
   if (deployTransport === 'ble') {
     await deployUserProgramWithBle(root, toolPython);
@@ -974,7 +985,7 @@ async function deployProjectCommand(): Promise<void> {
   }
 
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Zebra: Deploying project to ESP32', cancellable: false },
+    { location: vscode.ProgressLocation.Notification, title: options.fullOverwrite ? 'Zebra: Full overwrite deploy to ESP32' : 'Zebra: Deploying project to ESP32', cancellable: false },
     async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
       const stage = await buildStagedProject(root);
       const files = await collectDeployFiles(stage);
@@ -985,10 +996,12 @@ async function deployProjectCommand(): Promise<void> {
       const runtimeSignature = await getRuntimeSignatureForProject(root);
       const manifest = await readDeployManifest(root, port);
       const stagedHashes = await hashDeployFiles(stage, files);
-      const changedFiles = files.filter((localPath: string) => {
-        const rel = normalizePath(path.relative(stage, localPath));
-        return !manifest || manifest.runtimeSignature !== runtimeSignature || manifest.files[rel] !== stagedHashes[rel];
-      });
+      const changedFiles = options.fullOverwrite
+        ? files
+        : files.filter((localPath: string) => {
+          const rel = normalizePath(path.relative(stage, localPath));
+          return !manifest || manifest.runtimeSignature !== runtimeSignature || manifest.files[rel] !== stagedHashes[rel];
+        });
 
       output.appendLine(`Deploy stage: ${stage}`);
       output.appendLine(`Deploy manifest: ${getDeployManifestPath(root, port)}`);
@@ -1001,6 +1014,8 @@ async function deployProjectCommand(): Promise<void> {
 
       if (!manifest) {
         output.appendLine('No previous deploy manifest; uploading all staged files.');
+      } else if (options.fullOverwrite) {
+        output.appendLine('Full overwrite requested; uploading all staged files.');
       } else if (manifest.runtimeSignature !== runtimeSignature) {
         output.appendLine('Runtime or driver source changed; uploading all staged files.');
       }
@@ -1025,7 +1040,7 @@ async function deployProjectCommand(): Promise<void> {
     },
   );
 
-  void vscode.window.showInformationMessage('Zebra project deployed.');
+  void vscode.window.showInformationMessage(options.fullOverwrite ? 'Zebra project full overwrite deploy complete.' : 'Zebra project deployed.');
 }
 
 async function deployUserProgramWithBle(root: string, toolPython: string): Promise<void> {
@@ -3324,6 +3339,7 @@ class ZebraExplorerProvider implements vscode.TreeDataProvider<ZebraTreeItem> {
       commandItem('Check Driver Cache Updates', 'zebra.checkDriverCacheUpdates', 'cloud-download'),
       commandItem('Detect Serial Port', 'zebra.detectSerialPort', 'plug'),
       commandItem('Deploy Project / User Program', 'zebra.deployProject', 'cloud-upload'),
+      commandItem('Full Overwrite Flash', 'zebra.deployProjectFullOverwrite', 'zap'),
       commandItem('Robot Simulator', 'zebra.openSimulator', 'debug-start'),
       commandItem('Sensor Calibration', 'zebra.openSensorCalibration', 'symbol-color'),
       commandItem('Serial Monitor', 'zebra.openSerialMonitor', 'terminal'),

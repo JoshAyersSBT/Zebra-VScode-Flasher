@@ -29,6 +29,7 @@
     "onCommand:zebra.createUserMainFromExample",
     "onCommand:zebra.detectSerialPort",
     "onCommand:zebra.deployProject",
+    "onCommand:zebra.deployProjectFullOverwrite",
     "onCommand:zebra.flashFirmware",
     "onCommand:zebra.resetDevice",
     "onCommand:zebra.openSerialMonitor",
@@ -143,6 +144,11 @@
         "icon": "$(cloud-upload)"
       },
       {
+        "command": "zebra.deployProjectFullOverwrite",
+        "title": "Zebra: Full Overwrite Flash",
+        "icon": "$(zap)"
+      },
+      {
         "command": "zebra.flashFirmware",
         "title": "Zebra: Flash MicroPython Firmware",
         "icon": "$(zap)"
@@ -178,6 +184,12 @@
         "icon": "$(symbol-color)"
       }
     ],
+    "submenus": [
+      {
+        "id": "zebra.flashOptions",
+        "label": "Zebra Flash Options"
+      }
+    ],
     "menus": {
       "view/title": [
         {
@@ -203,9 +215,26 @@
           "group": "navigation@10"
         },
         {
+          "submenu": "zebra.flashOptions",
+          "when": "resourceLangId == python",
+          "group": "navigation@10"
+        },
+        {
           "command": "zebra.openSerialMonitor",
           "when": "resourceLangId == python",
           "group": "navigation@11"
+        }
+      ],
+      "zebra.flashOptions": [
+        {
+          "command": "zebra.deployProject",
+          "when": "resourceLangId == python",
+          "group": "navigation@1"
+        },
+        {
+          "command": "zebra.deployProjectFullOverwrite",
+          "when": "resourceLangId == python",
+          "group": "navigation@2"
         }
       ],
       "explorer/context": [
@@ -215,23 +244,28 @@
           "group": "zebra@1"
         },
         {
-          "command": "zebra.checkProject",
+          "command": "zebra.deployProjectFullOverwrite",
           "when": "zebra.projectActive",
           "group": "zebra@2"
         },
         {
-          "command": "zebra.projectSetup",
+          "command": "zebra.checkProject",
+          "when": "zebra.projectActive",
           "group": "zebra@3"
+        },
+        {
+          "command": "zebra.projectSetup",
+          "group": "zebra@4"
         },
         {
           "command": "zebra.openSimulator",
           "when": "zebra.projectActive",
-          "group": "zebra@4"
+          "group": "zebra@5"
         },
         {
           "command": "zebra.openSensorCalibration",
           "when": "zebra.projectActive",
-          "group": "zebra@5"
+          "group": "zebra@6"
         }
       ]
     },
